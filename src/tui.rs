@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
 
-use crate::application::TodoQueryProjection;
+use crate::application::{AgendaKind, AgendaOutput};
 
 /// Keys understood by the bounded calendar shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,26 +98,34 @@ impl TuiState {
 
     /// Render the complete frame using stable ordering supplied by the query boundary.
     #[must_use]
-    pub fn render(&self, todos: &[TodoQueryProjection]) -> String {
+    pub fn render(&self, agenda: &AgendaOutput) -> String {
         let mut frame = String::new();
-        frame.push_str("mg-calr | todos\n");
+        let _ = writeln!(
+            frame,
+            "mg-calr | agenda {}..{}",
+            agenda.start, agenda.end_exclusive
+        );
         frame.push_str("────────────────────────────────────────\n");
-        if todos.is_empty() {
-            frame.push_str("  (no todos)\n");
+        if agenda.items.is_empty() {
+            frame.push_str("  (no agenda items)\n");
         } else {
-            for (index, todo) in todos.iter().enumerate() {
+            for (index, item) in agenda.items.iter().enumerate() {
                 let marker = if index == self.selected { ">" } else { " " };
-                let state = if todo.completed_at.is_some() {
-                    "done"
-                } else if todo.trashed_at.is_some() {
-                    "trash"
-                } else {
-                    "open"
+                let kind = match item.kind {
+                    AgendaKind::Event => "event",
+                    AgendaKind::Todo => "todo",
+                };
+                let occurrence = item
+                    .occurrence_index
+                    .map_or_else(String::new, |index| format!(" occurrence={index}"));
+                let detail = match item.kind {
+                    AgendaKind::Event => format!("event={:?}", item.event_time),
+                    AgendaKind::Todo => format!("due={:?}", item.due),
                 };
                 let _ = writeln!(
                     frame,
-                    "{marker} [{state}] {} [{}]",
-                    todo.title, todo.priority
+                    "{marker} [{kind}] {} | {detail}{occurrence}",
+                    item.title
                 );
             }
         }
@@ -126,7 +134,7 @@ impl TuiState {
         frame
     }
 
-    /// Run the line-oriented shell over a loaded todo snapshot.
+    /// Run the line-oriented shell over a loaded agenda snapshot.
     ///
     /// The callback is invoked only after `r`, allowing the command layer to
     /// keep all persistence behind the existing application boundary.
@@ -135,27 +143,27 @@ impl TuiState {
     /// Returns input or terminal output errors.
     pub fn run<R, F>(
         &mut self,
-        todos: &mut Vec<TodoQueryProjection>,
+        agenda: &mut AgendaOutput,
         input: R,
         mut refresh: F,
     ) -> io::Result<()>
     where
         R: BufRead,
-        F: FnMut() -> io::Result<Vec<TodoQueryProjection>>,
+        F: FnMut() -> io::Result<AgendaOutput>,
     {
         let mut output = io::stdout().lock();
-        writeln!(output, "{}", self.render(todos))?;
+        writeln!(output, "{}", self.render(agenda))?;
         for line in input.lines() {
             let key = Key::parse(&line?);
-            self.apply(key, todos.len());
+            self.apply(key, agenda.items.len());
             if self.take_refresh_request() {
-                *todos = refresh()?;
-                self.complete_refresh(todos.len());
+                *agenda = refresh()?;
+                self.complete_refresh(agenda.items.len());
             }
             if self.should_quit() {
                 break;
             }
-            writeln!(output, "{}", self.render(todos))?;
+            writeln!(output, "{}", self.render(agenda))?;
         }
         output.flush()
     }
@@ -163,7 +171,7 @@ impl TuiState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, TuiState};
+    use super::{AgendaKind, AgendaOutput, Key, TuiState};
 
     #[test]
     fn navigation_is_bounded_and_refresh_is_explicit() {
@@ -189,11 +197,40 @@ mod tests {
 
     #[test]
     fn empty_render_is_stable() {
-        let frame = TuiState::new().render(&[]);
+        let agenda = AgendaOutput {
+            start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+            end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            items: Vec::new(),
+        };
+        let frame = TuiState::new().render(&agenda);
         assert_eq!(
             frame,
-            "mg-calr | todos\n────────────────────────────────────────\n  (no todos)\n────────────────────────────────────────\nj/k move  r refresh  q quit | ready\n"
+            "mg-calr | agenda 2026-08-24..2026-08-25\n────────────────────────────────────────\n  (no agenda items)\n────────────────────────────────────────\nj/k move  r refresh  q quit | ready\n"
         );
+    }
+
+    #[test]
+    fn agenda_render_shows_kind_and_recurrence_occurrence() {
+        use crate::application::AgendaItem;
+
+        let agenda = AgendaOutput {
+            start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+            end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            items: vec![AgendaItem {
+                kind: AgendaKind::Todo,
+                id: "todo-1".to_owned(),
+                title: "Standup".to_owned(),
+                due: None,
+                event_time: None,
+                priority: None,
+                occurrence_index: Some(2),
+                completed: false,
+                trashed: false,
+                blocked: false,
+            }],
+        };
+        let frame = TuiState::new().render(&agenda);
+        assert!(frame.contains("> [todo] Standup | due=None occurrence=2"));
     }
 
     #[test]

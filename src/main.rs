@@ -60,8 +60,8 @@ enum Command {
     /// Create and list projects.
     Project(ProjectArgs),
     Tag(TagArgs),
-    /// Open the bounded keyboard-first todo shell.
-    Tui,
+    /// Open the bounded keyboard-first agenda shell.
+    Tui(TuiArgs),
 }
 
 #[derive(Debug, Args)]
@@ -85,6 +85,19 @@ struct AgendaArgs {
     /// Include todos blocked by a live prerequisite.
     #[arg(long)]
     include_blocked: bool,
+}
+
+#[derive(Debug, Args)]
+struct TuiArgs {
+    /// Inclusive first civil date; defaults to today in UTC.
+    #[arg(long)]
+    start: Option<NaiveDate>,
+    /// Exclusive last civil date; defaults to one day after start.
+    #[arg(long)]
+    end: Option<NaiveDate>,
+    /// IANA timezone used for local-day boundaries and timed items.
+    #[arg(long, default_value = "UTC")]
+    timezone: String,
 }
 
 #[derive(Debug, Args)]
@@ -848,30 +861,42 @@ fn format_agenda_item(item: &AgendaItem) -> String {
     )
 }
 
-async fn run_tui(database: config::ConnectionSettings) -> Result<(), AppError> {
+async fn run_tui(args: &TuiArgs, database: config::ConnectionSettings) -> Result<(), AppError> {
+    let start = args.start.unwrap_or_else(|| Utc::now().date_naive());
+    let end = args.end.unwrap_or_else(|| start + chrono::Days::new(1));
+    if start >= end {
+        return Err(AppError::InvalidInput(
+            "tui --start must be before --end (end is exclusive)".to_owned(),
+        ));
+    }
     let load = || async {
-        TodoUseCases::new(PostgresTodoRepository::new(database.clone()))
-            .list_todos_async()
-            .await
-            .map_err(query_error)
+        let query =
+            AgendaQuery::try_new(start, end, args.timezone.clone()).map_err(AppError::from)?;
+        AgendaUseCases::new((
+            PostgresCalendarEventRepository::new(database.clone()),
+            PostgresTodoRepository::new(database.clone()),
+        ))
+        .query_async(query)
+        .await
+        .map_err(query_error)
     };
-    let mut todos = load().await?;
+    let mut agenda = load().await?;
     let mut state = TuiState::new();
     let stdin = io::stdin();
     let mut input = stdin.lock();
-    println!("{}", state.render(&todos));
+    println!("{}", state.render(&agenda));
     let mut line = String::new();
     while input.read_line(&mut line)? != 0 {
-        state.apply(mg_calr::tui::Key::parse(&line), todos.len());
+        state.apply(mg_calr::tui::Key::parse(&line), agenda.items.len());
         line.clear();
         if state.take_refresh_request() {
-            todos = load().await?;
-            state.complete_refresh(todos.len());
+            agenda = load().await?;
+            state.complete_refresh(agenda.items.len());
         }
         if state.should_quit() {
             break;
         }
-        print!("{}", state.render(&todos));
+        print!("{}", state.render(&agenda));
         io::stdout().flush()?;
     }
     Ok(())
@@ -982,7 +1007,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 ),
             }
         }
-        Command::Tui => run_tui(app_config.database).await,
+        Command::Tui(args) => run_tui(args, app_config.database).await,
     }
 }
 
