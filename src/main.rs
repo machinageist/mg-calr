@@ -168,6 +168,16 @@ enum TodoCommand {
         #[arg(long)]
         version: i64,
     },
+    /// Permanently delete one trashed todo after explicit confirmation.
+    Purge {
+        #[arg(long)]
+        todo_id: TodoId,
+        #[arg(long)]
+        version: i64,
+        /// Confirm permanent deletion; without it no database is accessed.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -667,6 +677,25 @@ async fn run_todo_command(
                 .await
                 .map_err(application_error)?,
         ),
+        TodoCommand::Purge {
+            todo_id,
+            version,
+            yes,
+        } => {
+            if !yes {
+                return Err(AppError::InvalidInput(
+                    "todo purge requires --yes confirmation; no database was accessed".to_owned(),
+                ));
+            }
+            print_projection(
+                json,
+                "todo.purge",
+                TodoUseCases::new(PostgresTodoRepository::new(database))
+                    .purge_todo_async(*todo_id, *version)
+                    .await
+                    .map_err(application_error)?,
+            )
+        }
     }
 }
 

@@ -45,6 +45,8 @@ impl AppError {
             Self::Storage(storage::StorageError::CalendarNotLive { .. }) => "calendar_not_live",
             Self::Storage(storage::StorageError::TodoNotFound { .. })
             | Self::TodoNotFound { .. } => "todo_not_found",
+            Self::Storage(storage::StorageError::TodoHasChildren { .. }) => "todo_has_children",
+            Self::Storage(storage::StorageError::TodoNotTrashed { .. }) => "todo_not_trashed",
             Self::Storage(storage::StorageError::ProjectNotFound { .. }) => "project_not_found",
             Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => "tag_already_exists",
             Self::Storage(storage::StorageError::TagNotFound { .. }) => "tag_not_found",
@@ -69,9 +71,11 @@ impl AppError {
             Self::Domain(_)
             | Self::Todo(_)
             | Self::InvalidInput(_)
-            | Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => 65,
+            | Self::Storage(storage::StorageError::TagAlreadyExists { .. })
+            | Self::Storage(storage::StorageError::TodoHasChildren { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
+            | Self::Storage(storage::StorageError::TodoNotTrashed { .. })
             | Self::Storage(storage::StorageError::TagNotFound { .. })
             | Self::Storage(storage::StorageError::ProjectNotFound { .. }) => 66,
             Self::Config(_) => 78,

@@ -102,3 +102,19 @@ fn todo_trash_and_restore_contracts_are_atomic_and_legacy_safe() {
     assert!(source.contains("COALESCE(trashed_at, deleted_at) AS trashed_at"));
     assert!(!source.contains("SET deleted_at = CURRENT_TIMESTAMP"));
 }
+
+#[test]
+fn todo_purge_contract_is_confirmed_version_guarded_and_transactional() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("pub async fn purge_todo"));
+    assert!(
+        source
+            .contains("SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1 FOR UPDATE")
+    );
+    assert!(source.contains("TodoNotTrashed"));
+    assert!(source.contains("DELETE FROM todo_tags WHERE todo_id = $1"));
+    assert!(source.contains("DELETE FROM todos WHERE id = $1 AND version = $2"));
+    assert!(source.contains("transaction.commit().await"));
+    assert!(!source.contains("format!(\"DELETE"));
+}

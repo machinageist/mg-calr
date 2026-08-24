@@ -98,6 +98,13 @@ pub trait AsyncTodoRepository {
         expected_version: i64,
     ) -> RepositoryFuture<'_, Todo, Self::Error>;
     /// # Errors
+    /// Returns a typed persistence, not-found, not-trashed, or optimistic-lock error.
+    fn purge_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, TodoId, Self::Error>;
+    /// # Errors
     /// Returns a typed persistence, not-found, or optimistic-lock error.
     fn edit_todo(
         &self,
@@ -567,6 +574,21 @@ where
             .restore_todo(todo_id, expected_version)
             .await
             .map(TodoQueryProjection::from)
+            .map_err(ApplicationError::Repository)
+    }
+
+    /// Permanently remove a trashed todo using its current optimistic-lock version.
+    ///
+    /// # Errors
+    /// Returns a typed repository persistence, not-found, not-trashed, or conflict error.
+    pub async fn purge_todo_async(
+        &self,
+        todo_id: TodoId,
+        expected_version: i64,
+    ) -> Result<TodoId, ApplicationError<R::Error>> {
+        self.repository
+            .purge_todo(todo_id, expected_version)
+            .await
             .map_err(ApplicationError::Repository)
     }
 

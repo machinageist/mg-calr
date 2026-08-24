@@ -51,6 +51,10 @@ pub enum StorageError {
     CalendarNotLive { calendar_id: CalendarId },
     #[error("todo {todo_id} does not exist or is trashed")]
     TodoNotFound { todo_id: TodoId },
+    #[error("todo {todo_id} has child todos and cannot be purged")]
+    TodoHasChildren { todo_id: TodoId },
+    #[error("todo {todo_id} is not trashed")]
+    TodoNotTrashed { todo_id: TodoId },
     #[error("project {project_id} does not exist or is archived")]
     ProjectNotFound { project_id: ProjectId },
     #[error("tag '{normalized_name}' already exists")]
@@ -717,7 +721,70 @@ impl PostgresTodoRepository {
         Ok(todo)
     }
 
-    /// Edit live core fields atomically when the caller's version is current.
+    /// Permanently delete a trashed todo when its caller-supplied version is current.
+    /// Join rows are removed explicitly in the same transaction; dependency FKs
+    /// use their existing ON DELETE CASCADE semantics.
+    pub async fn purge_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> Result<TodoId, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let Some(row) = transaction
+            .query_opt(
+                "SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1 FOR UPDATE",
+                &[&id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+        else {
+            return Err(StorageError::TodoNotFound { todo_id: id });
+        };
+        let trashed = row
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>(1)
+            .is_some()
+            || row
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                .is_some();
+        if !trashed {
+            return Err(StorageError::TodoNotTrashed { todo_id: id });
+        }
+        let actual_version = row.get::<_, i64>(0);
+        if actual_version != expected_version {
+            return Err(StorageError::TodoVersionConflict {
+                todo_id: id,
+                expected_version,
+                actual_version,
+            });
+        }
+        let child_count: i64 = transaction
+            .query_one(
+                "SELECT COUNT(*) FROM todos WHERE parent_id = $1",
+                &[&id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .get(0);
+        if child_count > 0 {
+            return Err(StorageError::TodoHasChildren { todo_id: id });
+        }
+        transaction
+            .execute("DELETE FROM todo_tags WHERE todo_id = $1", &[&id.as_uuid()])
+            .await
+            .map_err(StorageError::Query)?;
+        transaction
+            .execute(
+                "DELETE FROM todos WHERE id = $1 AND version = $2",
+                &[&id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(id)
+    }
+
+    /// Edit live core fields atomically when the caller-supplied version is current.
     ///
     /// # Errors
     /// Returns a database error, not-found error, or optimistic version conflict.
@@ -947,6 +1014,13 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
         expected_version: i64,
     ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
         Box::pin(async move { Self::restore_todo(self, id, expected_version).await })
+    }
+    fn purge_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, TodoId, Self::Error> {
+        Box::pin(async move { Self::purge_todo(self, id, expected_version).await })
     }
     fn edit_todo(
         &self,

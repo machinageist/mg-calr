@@ -361,3 +361,25 @@ fn no_input_project_create_reports_missing_name_without_database_access() {
         ))
         .stderr(predicate::str::contains("project name"));
 }
+
+#[test]
+fn todo_purge_requires_explicit_confirmation_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "purge",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("todo purge requires --yes"))
+        .stderr(predicate::str::contains("no database was accessed"));
+}
