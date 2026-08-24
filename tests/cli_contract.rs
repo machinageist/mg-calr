@@ -2,6 +2,46 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 
 #[test]
+fn event_import_help_exposes_file_argument() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "import", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--file"));
+}
+
+#[test]
+fn event_import_validates_before_database_access_and_hides_file_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("invalid-events.json");
+    std::fs::write(&file, r#"{"schema_version":2,"calendars":[],"events":[]}"#).unwrap();
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "event",
+            "import",
+            "--file",
+        ])
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("\"code\":\"import_invalid\""))
+        .stderr(predicate::str::contains(file.to_string_lossy().as_ref()).not());
+}
+
+#[test]
+fn event_export_help_is_available_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "export", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Export all calendars and events"));
+}
+
+#[test]
 fn reminder_scan_contract_is_explicitly_dry_run_capable() {
     cargo_bin_cmd!("mg-calr")
         .args(["todo", "scan-reminders", "--help"])

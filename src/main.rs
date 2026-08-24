@@ -171,6 +171,13 @@ enum EventCommand {
         #[arg(long)]
         version: i64,
     },
+    /// Export all calendars and events, including lifecycle metadata, as deterministic JSON.
+    Export,
+    /// Import a previously exported calendar/event JSON document transactionally.
+    Import {
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -744,7 +751,7 @@ async fn run_event_command(
             ));
         }
     }
-    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database));
+    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database.clone()));
     match &args.command {
         EventCommand::Create(_) => {
             let (calendar_id, title, time) = create_input.expect("create input exists");
@@ -799,6 +806,23 @@ async fn run_event_command(
                 .await
                 .map_err(event_lifecycle_error)?,
         ),
+        EventCommand::Export => {
+            let payload = storage::export_events(&database).await?;
+            println!("{}", serde_json::to_string(&payload)?);
+            Ok(())
+        }
+        EventCommand::Import { file } => {
+            let input = std::fs::read_to_string(file).map_err(|_| StorageError::ImportInvalid {
+                reason: "could not read import file".to_owned(),
+            })?;
+            let payload = storage::EventExport::parse(&input)?;
+            let count = storage::import_events(&database, &payload).await?;
+            print_debug(
+                json,
+                "event.import",
+                serde_json::json!({ "imported": count }),
+            )
+        }
     }
 }
 

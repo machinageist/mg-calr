@@ -164,6 +164,119 @@ pub struct TodoExport {
     pub todos: Vec<Todo>,
 }
 
+/// Versioned, lossless interchange document for local calendars and events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventExport {
+    pub schema_version: u8,
+    pub calendars: Vec<Calendar>,
+    pub events: Vec<Event>,
+}
+
+impl EventExport {
+    /// Parse and validate the complete document without opening a database.
+    pub fn parse(json: &str) -> Result<Self, StorageError> {
+        let mut payload: Self =
+            serde_json::from_str(json).map_err(|error| StorageError::ImportInvalid {
+                reason: error.to_string(),
+            })?;
+        payload.validate()?;
+        payload
+            .calendars
+            .sort_by_key(|calendar| (calendar.name.to_lowercase(), calendar.id.as_uuid()));
+        payload
+            .events
+            .sort_by_key(|event| (event.calendar_id.as_uuid(), event.id.as_uuid()));
+        Ok(payload)
+    }
+
+    fn validate(&self) -> Result<(), StorageError> {
+        if self.schema_version != 1 {
+            return Err(StorageError::ImportInvalid {
+                reason: format!("unsupported schema_version {}", self.schema_version),
+            });
+        }
+        let mut calendar_ids = HashSet::new();
+        let mut default_count = 0;
+        for calendar in &self.calendars {
+            Calendar::rehydrate(
+                calendar.id,
+                calendar.name.clone(),
+                calendar.color.clone(),
+                calendar.is_default,
+                calendar.created_at,
+                calendar.updated_at,
+                calendar.deleted_at,
+            )
+            .map_err(|error| StorageError::ImportInvalid {
+                reason: error.to_string(),
+            })?;
+            if calendar.deleted_at.is_none() && calendar.is_default {
+                default_count += 1;
+            }
+            if !calendar_ids.insert(calendar.id.as_uuid()) {
+                return Err(StorageError::ImportInvalid {
+                    reason: format!("duplicate calendar {}", calendar.id),
+                });
+            }
+        }
+        if default_count > 1 {
+            return Err(StorageError::ImportInvalid {
+                reason: "multiple live default calendars".to_owned(),
+            });
+        }
+        let mut event_ids = HashSet::new();
+        let mut rfc_uids = HashSet::new();
+        for event in &self.events {
+            if !calendar_ids.contains(&event.calendar_id.as_uuid()) {
+                return Err(StorageError::ImportInvalid {
+                    reason: format!("event {} references missing calendar", event.id),
+                });
+            }
+            if !event_ids.insert(event.id.as_uuid()) {
+                return Err(StorageError::ImportInvalid {
+                    reason: format!("duplicate event {}", event.id),
+                });
+            }
+            if !rfc_uids.insert(event.rfc_uid.as_str().to_owned()) {
+                return Err(StorageError::ImportInvalid {
+                    reason: format!("duplicate RFC UID for event {}", event.id),
+                });
+            }
+            match &event.time {
+                EventTime::Timed {
+                    start,
+                    end,
+                    timezone,
+                } => EventTime::timed(*start, *end, timezone.clone()),
+                EventTime::AllDay {
+                    start,
+                    end_exclusive,
+                } => EventTime::all_day(*start, *end_exclusive),
+            }
+            .map_err(|error| StorageError::ImportInvalid {
+                reason: error.to_string(),
+            })?;
+            Event::rehydrate(
+                event.id,
+                event.calendar_id,
+                event.rfc_uid.clone(),
+                event.title.clone(),
+                event.time.clone(),
+                event.metadata.clone(),
+                event.created_at,
+                event.updated_at,
+                event.deleted_at,
+                event.remote_tombstoned_at,
+                event.version,
+            )
+            .map_err(|error| StorageError::ImportInvalid {
+                reason: error.to_string(),
+            })?;
+        }
+        Ok(())
+    }
+}
+
 impl TodoExport {
     /// Parse and validate the complete document without opening a database.
     pub fn parse(json: &str) -> Result<Self, StorageError> {
@@ -2226,6 +2339,129 @@ pub async fn import_todos(
     }
     tx.commit().await.map_err(StorageError::Query)?;
     Ok(payload.projects.len() + payload.tags.len() + payload.todos.len())
+}
+
+/// Export all calendars and events, including cancelled/deleted lifecycle state.
+pub async fn export_events(settings: &ConnectionSettings) -> Result<EventExport, StorageError> {
+    let (client, _) = connect(settings).await?;
+    let calendars = client
+        .query(
+            "SELECT id, name, color, is_default, created_at, updated_at, deleted_at FROM calendars ORDER BY lower(name), id",
+            &[],
+        )
+        .await
+        .map_err(StorageError::Query)?
+        .iter()
+        .map(calendar_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let events = client
+        .query(&format!("{EVENT_SELECT} {EVENT_ORDER}"), &[])
+        .await
+        .map_err(StorageError::Query)?
+        .iter()
+        .map(event_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(EventExport {
+        schema_version: 1,
+        calendars,
+        events,
+    })
+}
+
+/// Import a fully validated calendar/event document atomically without overwriting.
+pub async fn import_events(
+    settings: &ConnectionSettings,
+    payload: &EventExport,
+) -> Result<usize, StorageError> {
+    payload.validate()?;
+    let (mut client, _) = connect(settings).await?;
+    let tx = client.transaction().await.map_err(StorageError::Query)?;
+    for calendar in &payload.calendars {
+        if tx
+            .query_opt(
+                "SELECT 1 FROM calendars WHERE id = $1",
+                &[&calendar.id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .is_some()
+        {
+            return Err(StorageError::ImportConflict {
+                kind: "calendar",
+                id: calendar.id.to_string(),
+            });
+        }
+        if calendar.is_default
+            && calendar.deleted_at.is_none()
+            && tx
+                .query_opt(
+                    "SELECT 1 FROM calendars WHERE is_default AND deleted_at IS NULL",
+                    &[],
+                )
+                .await
+                .map_err(StorageError::Query)?
+                .is_some()
+        {
+            return Err(StorageError::ImportConflict {
+                kind: "calendar",
+                id: calendar.id.to_string(),
+            });
+        }
+    }
+    for event in &payload.events {
+        if tx
+            .query_opt(
+                "SELECT 1 FROM events WHERE id = $1 OR rfc_uid = $2",
+                &[&event.id.as_uuid(), &event.rfc_uid.as_str()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .is_some()
+        {
+            return Err(StorageError::ImportConflict {
+                kind: "event",
+                id: event.id.to_string(),
+            });
+        }
+    }
+    for calendar in &payload.calendars {
+        tx.execute(
+            "INSERT INTO calendars (id,name,color,is_default,created_at,updated_at,deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            &[&calendar.id.as_uuid(), &calendar.name, &calendar.color, &calendar.is_default, &calendar.created_at, &calendar.updated_at, &calendar.deleted_at],
+        ).await.map_err(StorageError::Query)?;
+    }
+    for event in &payload.events {
+        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &event.time {
+            EventTime::Timed {
+                start,
+                end,
+                timezone,
+            } => (
+                Some(timezone.as_str()),
+                Some(start.with_timezone(&Utc)),
+                Some(end.with_timezone(&Utc)),
+                None,
+                None,
+            ),
+            EventTime::AllDay {
+                start,
+                end_exclusive,
+            } => (None, None, None, Some(*start), Some(*end_exclusive)),
+        };
+        let status = event.metadata.status.map(event_status);
+        let extension_properties = serde_json::json!({
+            "categories": event.metadata.categories,
+            "alarms": event.metadata.alarms,
+            "organizer": event.metadata.organizer,
+            "attendees": event.metadata.attendees,
+        });
+        tx.execute(
+            "INSERT INTO events (id,calendar_id,rfc_uid,title,description,location,url,status,busy,timezone,starts_at,ends_at,all_day_start,all_day_end,recurrence_rule,extension_properties,created_at,updated_at,deleted_at,remote_tombstoned_at,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            &[&event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(), &event.title, &event.metadata.description, &event.metadata.location, &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at, &ends_at, &all_day_start, &all_day_end, &event.metadata.recurrence_rule, &extension_properties, &event.created_at, &event.updated_at, &event.deleted_at, &event.remote_tombstoned_at, &event.version],
+        ).await.map_err(StorageError::Query)?;
+    }
+    tx.commit().await.map_err(StorageError::Query)?;
+    Ok(payload.calendars.len() + payload.events.len())
 }
 
 fn event_status(status: EventStatus) -> &'static str {
