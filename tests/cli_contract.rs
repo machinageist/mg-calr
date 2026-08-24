@@ -254,3 +254,15 @@ fn todo_complete_requires_id_and_version_without_database_access() {
         .code(2)
         .stderr(predicate::str::contains("--todo-id"));
 }
+
+#[test]
+fn todo_trash_and_restore_require_id_and_version_without_database_access() {
+    for command in ["trash", "restore"] {
+        cargo_bin_cmd!("mg-calr")
+            .args(["--json", "--no-input", "todo", command])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("--todo-id"));
+    }
+}

@@ -121,6 +121,20 @@ enum TodoCommand {
         #[arg(long)]
         version: i64,
     },
+    /// Trash one live todo using its current optimistic-lock version.
+    Trash {
+        #[arg(long)]
+        todo_id: TodoId,
+        #[arg(long)]
+        version: i64,
+    },
+    /// Restore one trashed todo using its current optimistic-lock version.
+    Restore {
+        #[arg(long)]
+        todo_id: TodoId,
+        #[arg(long)]
+        version: i64,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -480,6 +494,22 @@ async fn run_todo_command(
             "todo.complete",
             TodoUseCases::new(PostgresTodoRepository::new(database))
                 .complete_todo_async(*todo_id, *version)
+                .await
+                .map_err(application_error)?,
+        ),
+        TodoCommand::Trash { todo_id, version } => print_projection(
+            json,
+            "todo.trash",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .trash_todo_async(*todo_id, *version)
+                .await
+                .map_err(application_error)?,
+        ),
+        TodoCommand::Restore { todo_id, version } => print_projection(
+            json,
+            "todo.restore",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .restore_todo_async(*todo_id, *version)
                 .await
                 .map_err(application_error)?,
         ),

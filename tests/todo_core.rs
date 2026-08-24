@@ -122,3 +122,17 @@ fn completed_projection_preserves_completed_state_and_version() {
     assert_eq!(value["version"], 2);
     assert!(projection.to_string().contains("completed"));
 }
+
+#[test]
+fn trash_behavior_preserves_completion_and_advances_version() {
+    let mut todo = Todo::new("Completed but recoverable").unwrap();
+    todo.completed_at = Some(chrono::Utc::now());
+    let original_version = todo.version;
+    todo.trashed_at = Some(chrono::Utc::now());
+    todo.version += 1;
+
+    let projection = TodoQueryProjection::from(todo);
+    assert!(projection.completed_at.is_some());
+    assert!(projection.trashed_at.is_some());
+    assert_eq!(projection.version, original_version + 1);
+}

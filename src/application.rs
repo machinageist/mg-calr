@@ -82,6 +82,20 @@ pub trait AsyncTodoRepository {
         id: TodoId,
         expected_version: i64,
     ) -> RepositoryFuture<'_, Todo, Self::Error>;
+    /// # Errors
+    /// Returns a typed persistence, not-found, or optimistic-lock error.
+    fn trash_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, Todo, Self::Error>;
+    /// # Errors
+    /// Returns a typed persistence, not-found, or optimistic-lock error.
+    fn restore_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, Todo, Self::Error>;
 }
 
 #[derive(Debug, Error)]
@@ -311,6 +325,40 @@ where
     ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
         self.repository
             .complete_todo(todo_id, expected_version)
+            .await
+            .map(TodoQueryProjection::from)
+            .map_err(ApplicationError::Repository)
+    }
+
+    /// Trash a live todo using its current optimistic-lock version. Completed
+    /// todos may be trashed; the legacy `deleted_at` column is untouched.
+    ///
+    /// # Errors
+    /// Returns a typed repository persistence, not-found, or version-conflict error.
+    pub async fn trash_todo_async(
+        &self,
+        todo_id: TodoId,
+        expected_version: i64,
+    ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
+        self.repository
+            .trash_todo(todo_id, expected_version)
+            .await
+            .map(TodoQueryProjection::from)
+            .map_err(ApplicationError::Repository)
+    }
+
+    /// Restore a trashed todo using its current optimistic-lock version. Legacy
+    /// `deleted_at` tombstones are cleared during restoration.
+    ///
+    /// # Errors
+    /// Returns a typed repository persistence, not-found, or version-conflict error.
+    pub async fn restore_todo_async(
+        &self,
+        todo_id: TodoId,
+        expected_version: i64,
+    ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
+        self.repository
+            .restore_todo(todo_id, expected_version)
             .await
             .map(TodoQueryProjection::from)
             .map_err(ApplicationError::Repository)
