@@ -16,6 +16,19 @@ fn postgres_repository_contract_uses_transactional_parameterized_inserts() {
 }
 
 #[test]
+fn postgres_read_contract_is_parameterized_and_deterministically_ordered() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("WHERE e.id = $1"));
+    assert!(source.contains("$1::uuid IS NULL OR e.calendar_id = $1"));
+    assert!(source.contains("e.all_day_start < $2"));
+    assert!(source.contains("e.starts_at < $4"));
+    assert!(source.contains("ORDER BY lower(name), id"));
+    assert!(source.contains("lower(e.title), e.id"));
+    assert!(!source.contains("format!(\"SELECT"));
+}
+
+#[test]
 fn repository_preserves_standard_event_fields_in_storage_contract() {
     let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
 

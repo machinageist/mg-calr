@@ -1,8 +1,16 @@
+use std::fmt::Display;
+use std::io::{self, Write};
 use std::process::ExitCode;
+use std::str::FromStr;
 
+use chrono::{DateTime, FixedOffset, NaiveDate};
 use clap::{Args, Parser, Subcommand};
+use mg_calr::application::{
+    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError,
+};
 use mg_calr::config;
-use mg_calr::storage::{self, MigrationState};
+use mg_calr::domain::{CalendarId, EventId, EventTime};
+use mg_calr::storage::{self, MigrationState, PostgresCalendarEventRepository, StorageError};
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
 use serde::Serialize;
 
@@ -12,10 +20,13 @@ struct Cli {
     /// Emit the stable machine-readable JSON envelope.
     #[arg(long, global = true)]
     json: bool,
+    /// Never prompt; fail when required input is absent.
+    #[arg(long, global = true)]
+    no_input: bool,
     /// Disable ANSI color. `NO_COLOR` also disables color.
     #[arg(long, global = true)]
     no_color: bool,
-    /// Override the PostgreSQL connection for database commands.
+    /// Override the PostgreSQL connection.
     #[arg(long, global = true, value_name = "URL")]
     database_url: Option<String>,
     #[command(subcommand)]
@@ -24,16 +35,79 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print build version information.
     Version,
-    /// Inspect configuration.
     Config(ConfigArgs),
-    /// Run explicit database operations.
     Database(DatabaseArgs),
-    /// Diagnose configuration and database readiness without migration.
     Doctor,
-    /// Diagnose prerequisites and print administrator guidance; never runs sudo.
     Init,
+    /// Create and list calendars.
+    Calendar(CalendarArgs),
+    /// Create and query events.
+    Event(EventArgs),
+}
+
+#[derive(Debug, Args)]
+struct CalendarArgs {
+    #[command(subcommand)]
+    command: CalendarCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CalendarCommand {
+    /// Create a calendar. Missing name is prompted unless --no-input is set.
+    Create(CalendarCreateArgs),
+    /// List live calendars in stable order.
+    List,
+}
+
+#[derive(Debug, Args)]
+struct CalendarCreateArgs {
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct EventArgs {
+    #[command(subcommand)]
+    command: EventCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum EventCommand {
+    /// Create one explicit timed or all-day event.
+    Create(EventCreateArgs),
+    /// Show one live event by its full stable ID.
+    Show { event_id: EventId },
+    /// List live events, optionally scoped to a calendar.
+    List {
+        #[arg(long)]
+        calendar: Option<CalendarId>,
+    },
+    /// Show events overlapping one local day in an explicit IANA timezone.
+    DayAgenda {
+        #[arg(long)]
+        date: NaiveDate,
+        #[arg(long)]
+        timezone: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct EventCreateArgs {
+    #[arg(long)]
+    calendar: Option<CalendarId>,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    start: Option<DateTime<FixedOffset>>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    end: Option<DateTime<FixedOffset>>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    timezone: Option<String>,
+    #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
+    all_day_start: Option<NaiveDate>,
+    #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
+    all_day_end: Option<NaiveDate>,
 }
 
 #[derive(Debug, Args)]
@@ -44,7 +118,6 @@ struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
-    /// Print resolved XDG paths.
     Paths,
 }
 
@@ -56,9 +129,7 @@ struct DatabaseArgs {
 
 #[derive(Debug, Subcommand)]
 enum DatabaseCommand {
-    /// Apply all pending embedded migrations transactionally.
     Migrate,
-    /// Report embedded migration state without applying migrations.
     Status,
 }
 
@@ -81,7 +152,7 @@ struct DoctorOutput {
     administrator_guidance: Vec<String>,
 }
 
-fn print_output<T: Serialize + std::fmt::Debug>(
+fn print_debug<T: Serialize + std::fmt::Debug>(
     json: bool,
     command: &'static str,
     output: T,
@@ -97,12 +168,219 @@ fn print_output<T: Serialize + std::fmt::Debug>(
     Ok(())
 }
 
+fn print_projection<T: Serialize + Display>(
+    json: bool,
+    command: &'static str,
+    output: T,
+) -> Result<(), AppError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&Envelope::success(command, output))?
+        );
+    } else {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+fn print_projections<T: Serialize + Display>(
+    json: bool,
+    command: &'static str,
+    output: Vec<T>,
+) -> Result<(), AppError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&Envelope::success(command, output))?
+        );
+    } else {
+        for item in output {
+            println!("{item}");
+        }
+    }
+    Ok(())
+}
+
+fn required<T: FromStr>(
+    value: Option<T>,
+    no_input: bool,
+    field: &'static str,
+    prompt_text: &str,
+) -> Result<T, AppError>
+where
+    T::Err: Display,
+{
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    if no_input {
+        return Err(AppError::RequiredInput { field });
+    }
+    let value = prompt(prompt_text)?;
+    value
+        .parse()
+        .map_err(|error: T::Err| AppError::InvalidInput(format!("{field}: {error}")))
+}
+
+fn prompt(prompt_text: &str) -> Result<String, AppError> {
+    eprint!("{prompt_text}: ");
+    io::stderr().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(AppError::InvalidInput(format!(
+            "{prompt_text} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn event_time(args: &EventCreateArgs, no_input: bool) -> Result<EventTime, AppError> {
+    let has_timed = args.start.is_some() || args.end.is_some() || args.timezone.is_some();
+    let has_all_day = args.all_day_start.is_some() || args.all_day_end.is_some();
+    let kind = if has_timed {
+        "timed".to_owned()
+    } else if has_all_day {
+        "all-day".to_owned()
+    } else if no_input {
+        return Err(AppError::RequiredInput {
+            field: "event time (--start/--end/--timezone or --all-day-start/--all-day-end)",
+        });
+    } else {
+        let kind = prompt("Event kind (timed/all-day)")?;
+        match kind.as_str() {
+            "timed" | "all-day" => kind,
+            _ => {
+                return Err(AppError::InvalidInput(
+                    "event kind must be 'timed' or 'all-day'".to_owned(),
+                ));
+            }
+        }
+    };
+
+    if kind == "timed" {
+        let start = required(args.start, no_input, "start", "Start (RFC3339)")?;
+        let end = required(args.end, no_input, "end", "End (RFC3339)")?;
+        let timezone = required(args.timezone.clone(), no_input, "timezone", "IANA timezone")?;
+        EventTime::timed(start, end, timezone).map_err(AppError::from)
+    } else {
+        let start = required(
+            args.all_day_start,
+            no_input,
+            "all-day start",
+            "All-day start (YYYY-MM-DD)",
+        )?;
+        let end = required(
+            args.all_day_end,
+            no_input,
+            "all-day end",
+            "All-day exclusive end (YYYY-MM-DD)",
+        )?;
+        EventTime::all_day(start, end).map_err(AppError::from)
+    }
+}
+
+fn application_error(error: ApplicationError<StorageError>) -> AppError {
+    match error {
+        ApplicationError::Domain(error) => AppError::Domain(error),
+        ApplicationError::Repository(error) => AppError::Storage(error),
+    }
+}
+
+fn query_error(error: QueryError<StorageError>) -> AppError {
+    match error {
+        QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
+        QueryError::InvalidTimezone { .. } | QueryError::InvalidDayBoundary { .. } => {
+            AppError::InvalidInput(error.to_string())
+        }
+        QueryError::Repository(error) => AppError::Storage(error),
+    }
+}
+
+async fn run_calendar_command(
+    args: &CalendarArgs,
+    database: config::ConnectionSettings,
+    json: bool,
+    no_input: bool,
+) -> Result<(), AppError> {
+    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database));
+    match &args.command {
+        CalendarCommand::Create(args) => {
+            let name = required(
+                args.name.clone(),
+                no_input,
+                "calendar name",
+                "Calendar name",
+            )?;
+            let calendar = app
+                .create_calendar_async(name)
+                .await
+                .map_err(application_error)?;
+            print_projection(json, "calendar.create", CalendarProjection::from(calendar))
+        }
+        CalendarCommand::List => print_projections(
+            json,
+            "calendar.list",
+            app.list_calendars_async().await.map_err(query_error)?,
+        ),
+    }
+}
+
+async fn run_event_command(
+    args: &EventArgs,
+    database: config::ConnectionSettings,
+    json: bool,
+    no_input: bool,
+) -> Result<(), AppError> {
+    let create_input = if let EventCommand::Create(args) = &args.command {
+        Some((
+            required(args.calendar, no_input, "calendar", "Calendar ID")?,
+            required(args.title.clone(), no_input, "title", "Event title")?,
+            event_time(args, no_input)?,
+        ))
+    } else {
+        None
+    };
+    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database));
+    match &args.command {
+        EventCommand::Create(_) => {
+            let (calendar_id, title, time) = create_input.expect("create input exists");
+            let event = app
+                .create_event_async(calendar_id, title, time)
+                .await
+                .map_err(application_error)?;
+            print_projection(json, "event.create", EventProjection::from(event))
+        }
+        EventCommand::Show { event_id } => print_projection(
+            json,
+            "event.show",
+            app.show_event_async(*event_id).await.map_err(query_error)?,
+        ),
+        EventCommand::List { calendar } => print_projections(
+            json,
+            "event.list",
+            app.list_events_async(*calendar)
+                .await
+                .map_err(query_error)?,
+        ),
+        EventCommand::DayAgenda { date, timezone } => print_projections(
+            json,
+            "event.day-agenda",
+            app.day_agenda_async(*date, timezone)
+                .await
+                .map_err(query_error)?,
+        ),
+    }
+}
+
 async fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
     let app_config = config::load(cli.database_url.clone())?;
 
     match &cli.command {
-        Command::Version => print_output(
+        Command::Version => print_debug(
             cli.json,
             "version",
             VersionOutput {
@@ -111,7 +389,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         ),
         Command::Config(ConfigArgs {
             command: ConfigCommand::Paths,
-        }) => print_output(cli.json, "config.paths", app_config.paths),
+        }) => print_debug(cli.json, "config.paths", app_config.paths),
         Command::Database(database) => {
             let (command, migrations) = match database.command {
                 DatabaseCommand::Migrate => (
@@ -123,7 +401,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                     storage::migration_status(&app_config.database).await?,
                 ),
             };
-            print_output(
+            print_debug(
                 cli.json,
                 command,
                 DatabaseOutput {
@@ -134,7 +412,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }
         Command::Doctor => {
             let migrations = storage::doctor(&app_config.database).await?;
-            print_output(
+            print_debug(
                 cli.json,
                 "doctor",
                 DoctorOutput {
@@ -151,7 +429,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 Ok(migrations) => (true, migrations),
                 Err(_) => (false, Vec::new()),
             };
-            print_output(
+            print_debug(
                 cli.json,
                 "init",
                 DoctorOutput {
@@ -167,6 +445,12 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                     ],
                 },
             )
+        }
+        Command::Calendar(calendar) => {
+            run_calendar_command(calendar, app_config.database, cli.json, cli.no_input).await
+        }
+        Command::Event(event) => {
+            run_event_command(event, app_config.database, cli.json, cli.no_input).await
         }
     }
 }

@@ -12,6 +12,16 @@ pub enum AppError {
     Config(#[from] config::ConfigError),
     #[error(transparent)]
     Storage(#[from] storage::StorageError),
+    #[error(transparent)]
+    Domain(#[from] domain::DomainError),
+    #[error("required input is missing: {field}")]
+    RequiredInput { field: &'static str },
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("event {event_id} was not found")]
+    EventNotFound { event_id: domain::EventId },
+    #[error("could not read interactive input: {0}")]
+    Input(#[from] std::io::Error),
     #[error("could not serialize output: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -28,7 +38,12 @@ impl AppError {
             Self::Storage(storage::StorageError::Connect(_)) => "database_unavailable",
             Self::Storage(storage::StorageError::MigrationDrift { .. }) => "migration_drift",
             Self::Storage(storage::StorageError::CalendarNotLive { .. }) => "calendar_not_live",
+            Self::Storage(storage::StorageError::InvalidStoredData(_)) => "stored_data_invalid",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
+            Self::Domain(_) | Self::InvalidInput(_) => "invalid_input",
+            Self::RequiredInput { .. } => "required_input_missing",
+            Self::EventNotFound { .. } => "event_not_found",
+            Self::Input(_) => "input_unavailable",
             Self::Serialization(_) => "serialization_error",
         }
     }
@@ -36,6 +51,9 @@ impl AppError {
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
+            Self::RequiredInput { .. } | Self::Input(_) => 64,
+            Self::Domain(_) | Self::InvalidInput(_) => 65,
+            Self::EventNotFound { .. } => 66,
             Self::Config(_) => 78,
             Self::Storage(_) => 69,
             Self::Serialization(_) => 70,

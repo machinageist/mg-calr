@@ -32,6 +32,31 @@ fn timed_events_require_iana_timezone_and_end_after_start() {
 }
 
 #[test]
+fn timed_event_offsets_must_match_the_iana_zone_at_each_instant() {
+    let error = EventTime::timed(
+        instant("2026-08-24T09:00:00+00:00"),
+        instant("2026-08-24T10:00:00+00:00"),
+        "America/Los_Angeles",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        DomainError::OffsetTimezoneMismatch {
+            boundary: "start",
+            ..
+        }
+    ));
+
+    let crossing = EventTime::timed(
+        instant("2026-11-01T01:30:00-07:00"),
+        instant("2026-11-01T01:30:00-08:00"),
+        "US/Pacific",
+    )
+    .expect("each side of a DST transition may have its own valid offset");
+    assert!(matches!(crossing, EventTime::Timed { .. }));
+}
+
+#[test]
 fn all_day_events_use_an_exclusive_end_date() {
     let start = NaiveDate::from_ymd_opt(2026, 8, 23).unwrap();
     let next_day = NaiveDate::from_ymd_opt(2026, 8, 24).unwrap();

@@ -67,3 +67,116 @@ fn init_reports_unavailable_database_without_failing_or_mutating() {
         .stdout(predicate::str::contains("\"database_reachable\":false"))
         .stdout(predicate::str::contains("administrator_guidance"));
 }
+
+#[test]
+fn no_input_calendar_create_reports_missing_name_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "calendar",
+            "create",
+        ])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains(
+            "\"code\":\"required_input_missing\"",
+        ))
+        .stderr(predicate::str::contains("calendar name"));
+}
+
+#[test]
+fn no_input_event_create_reports_missing_fields_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "event",
+            "create",
+        ])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains(
+            "\"code\":\"required_input_missing\"",
+        ))
+        .stderr(predicate::str::contains("calendar"));
+}
+
+#[test]
+fn event_create_requires_one_explicit_temporal_form() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "event",
+            "create",
+            "--calendar",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--title",
+            "Standup",
+            "--start",
+            "2026-08-24T09:00:00-07:00",
+            "--end",
+            "2026-08-24T09:15:00-07:00",
+        ])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains("timezone"));
+}
+
+#[test]
+fn event_create_rejects_mixed_timed_and_all_day_flags() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "event",
+            "create",
+            "--calendar",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--title",
+            "Standup",
+            "--start",
+            "2026-08-24T09:00:00-07:00",
+            "--end",
+            "2026-08-24T09:15:00-07:00",
+            "--timezone",
+            "America/Los_Angeles",
+            "--all-day-start",
+            "2026-08-24",
+            "--all-day-end",
+            "2026-08-25",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn event_create_rejects_unknown_iana_timezone_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "event",
+            "create",
+            "--calendar",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--title",
+            "Standup",
+            "--start",
+            "2026-08-24T09:00:00-07:00",
+            "--end",
+            "2026-08-24T09:15:00-07:00",
+            "--timezone",
+            "Mars/Olympus",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("valid IANA timezone"));
+}

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Offset, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,6 +23,13 @@ pub enum DomainError {
     MissingTimezone,
     #[error("'{timezone}' is not a valid IANA timezone")]
     InvalidTimezone { timezone: String },
+    #[error(
+        "timed event {boundary} offset does not match IANA timezone '{timezone}' at that instant"
+    )]
+    OffsetTimezoneMismatch {
+        boundary: &'static str,
+        timezone: String,
+    },
     #[error("timed event end must be after start")]
     EndNotAfterStart,
     #[error("all-day event end must be after start and is exclusive")]
@@ -168,6 +175,30 @@ impl Calendar {
             deleted_at: None,
         })
     }
+
+    /// Rehydrate a persisted calendar while re-running domain validation.
+    ///
+    /// # Errors
+    /// Returns an error when persisted calendar fields violate domain validation.
+    pub fn rehydrate(
+        id: CalendarId,
+        name: impl Into<String>,
+        color: Option<String>,
+        is_default: bool,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        deleted_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, DomainError> {
+        Ok(Self {
+            id,
+            name: validate_text("calendar name", name.into())?,
+            color,
+            is_default,
+            created_at,
+            updated_at,
+            deleted_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,8 +230,16 @@ impl EventTime {
         if timezone.trim().is_empty() {
             return Err(DomainError::MissingTimezone);
         }
-        if timezone.parse::<Tz>().is_err() {
-            return Err(DomainError::InvalidTimezone { timezone });
+        let zone = timezone
+            .parse::<Tz>()
+            .map_err(|_| DomainError::InvalidTimezone {
+                timezone: timezone.clone(),
+            })?;
+        for (boundary, value) in [("start", start), ("end", end)] {
+            let expected = value.with_timezone(&zone).offset().fix();
+            if expected != *value.offset() {
+                return Err(DomainError::OffsetTimezoneMismatch { boundary, timezone });
+            }
         }
         Ok(Self::Timed {
             start,
@@ -305,6 +344,37 @@ impl Event {
             updated_at: now,
             deleted_at: None,
             remote_tombstoned_at: None,
+        })
+    }
+
+    /// Rehydrate a persisted event while re-running title validation.
+    ///
+    /// # Errors
+    /// Returns an error when persisted event fields violate domain validation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate(
+        id: EventId,
+        calendar_id: CalendarId,
+        rfc_uid: RfcUid,
+        title: impl Into<String>,
+        time: EventTime,
+        metadata: EventMetadata,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        deleted_at: Option<DateTime<Utc>>,
+        remote_tombstoned_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, DomainError> {
+        Ok(Self {
+            id,
+            calendar_id,
+            rfc_uid,
+            title: validate_text("event title", title.into())?,
+            time,
+            metadata,
+            created_at,
+            updated_at,
+            deleted_at,
+            remote_tombstoned_at,
         })
     }
 }
