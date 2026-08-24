@@ -13,11 +13,14 @@ use crate::application::TodoEdit;
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
-    todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId},
+    todo::{
+        Priority, Project, ProjectId, RecurrenceRule, Tag, TagId, Todo, TodoDue, TodoError, TodoId,
+    },
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
 pub const TODO_CORE_MIGRATION: &str = include_str!("../migrations/0002_todo_core.sql");
+pub const TODO_RECURRENCE_MIGRATION: &str = include_str!("../migrations/0003_todo_recurrence.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -36,6 +39,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "todo_core",
         sql: TODO_CORE_MIGRATION,
+    },
+    Migration {
+        version: 3,
+        name: "todo_recurrence",
+        sql: TODO_RECURRENCE_MIGRATION,
     },
 ];
 
@@ -83,6 +91,8 @@ pub enum StorageError {
         expected_version: i64,
         actual_version: i64,
     },
+    #[error("invalid recurrence rule: {reason}")]
+    InvalidRecurrence { reason: String },
     #[error("stored calendar/event data is invalid: {0}")]
     InvalidStoredData(String),
     #[error("migration version {version} is recorded as '{actual}', expected '{expected}'")]
@@ -284,7 +294,7 @@ const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0
 
 const TODO_SELECT: &str = "SELECT t.id, t.parent_id, t.title, t.notes, t.due_date, t.due_at, \
     t.timezone, t.priority, t.project_id, t.completed_at, COALESCE(t.trashed_at, t.deleted_at) AS trashed_at, t.version, \
-    t.created_at, t.updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids, \
+    t.created_at, t.updated_at, t.recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids, \
     COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = t.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[]) AS dependency_ids FROM todos t";
 const TODO_ORDER: &str = "ORDER BY CASE WHEN t.due_date IS NULL AND t.due_at IS NULL THEN 1 ELSE 0 END, \
     t.due_date NULLS LAST, t.due_at NULLS LAST, lower(t.title), t.id";
@@ -581,6 +591,20 @@ impl PostgresTodoRepository {
     /// # Errors
     /// Returns connection or PostgreSQL errors.
     pub async fn save_todo(&self, todo: &Todo) -> Result<(), StorageError> {
+        todo.clone().rehydrate().map_err(|error| match error {
+            TodoError::InvalidRecurrenceInterval
+            | TodoError::InvalidRecurrenceCount
+            | TodoError::RecurrenceUntilNotAfterDue
+            | TodoError::RecurrenceWithoutDue
+            | TodoError::InvalidRecurrenceRange => recurrence_error(&error),
+            other => StorageError::InvalidStoredData(other.to_string()),
+        })?;
+        let recurrence_rule = todo
+            .recurrence
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
         let (mut client, _connection_task) = connect(&self.settings).await?;
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let mut dependency_uuids = todo
@@ -624,11 +648,11 @@ impl PostgresTodoRepository {
             None => (None, None, None),
         };
         transaction.execute(
-            "INSERT INTO todos (id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, trashed_at, version, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            "INSERT INTO todos (id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, trashed_at, version, created_at, updated_at, recurrence_rule) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             &[&todo.id.as_uuid(), &todo.parent_id.map(TodoId::as_uuid), &todo.title,
               &todo.notes, &due_date, &due_at, &timezone, &todo.priority.to_string(),
               &todo.project_id.map(ProjectId::as_uuid), &todo.completed_at, &todo.trashed_at,
-              &todo.version, &todo.created_at, &todo.updated_at],
+              &todo.version, &todo.created_at, &todo.updated_at, &recurrence_rule],
         ).await.map_err(StorageError::Query)?;
         for tag_id in &todo.tag_ids {
             transaction
@@ -696,7 +720,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -738,7 +762,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -765,7 +789,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -859,6 +883,9 @@ impl PostgresTodoRepository {
         expected_version: i64,
         edit: TodoEdit,
     ) -> Result<Todo, StorageError> {
+        if let Some(Some(rule)) = &edit.recurrence {
+            rule.validate().map_err(|error| recurrence_error(&error))?;
+        }
         let (mut client, _connection_task) = connect(&self.settings).await?;
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         // Serialize hierarchy edits before taking target/ancestor row locks so
@@ -1035,7 +1062,7 @@ impl PostgresTodoRepository {
         }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id, &parent_changed, &parent_id],
             )
             .await
@@ -1043,7 +1070,30 @@ impl PostgresTodoRepository {
         let Some(row) = row else {
             return todo_edit_conflict(&transaction, id, expected_version).await;
         };
-        let mut todo = todo_from_row(&row)?;
+        let mut todo = todo_from_row(&row).map_err(|error| match error {
+            StorageError::InvalidStoredData(reason) if reason.contains("recurrence") => {
+                StorageError::InvalidRecurrence { reason }
+            }
+            other => other,
+        })?;
+        if let Some(recurrence) = edit.recurrence {
+            let recurrence_rule = recurrence
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+            transaction
+                .execute(
+                    "UPDATE todos SET recurrence_rule = $2 WHERE id = $1",
+                    &[&id.as_uuid(), &recurrence_rule],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+            todo.recurrence = recurrence;
+            todo.clone()
+                .rehydrate()
+                .map_err(|error| recurrence_error(&error))?;
+        }
         if let Some(ids) = tag_ids {
             transaction
                 .execute("DELETE FROM todo_tags WHERE todo_id = $1", &[&id.as_uuid()])
@@ -1362,6 +1412,12 @@ fn project_from_row(row: &Row) -> Result<Project, StorageError> {
     .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
 }
 
+fn recurrence_error(error: &TodoError) -> StorageError {
+    StorageError::InvalidRecurrence {
+        reason: error.to_string(),
+    }
+}
+
 fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     let parse_id = |value: Uuid, kind: &'static str| {
         value.to_string().parse().map_err(|error| {
@@ -1404,16 +1460,29 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     }
     .transpose()
     .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
-    let tag_ids = if row.len() > 14 {
-        row.get::<_, Vec<Uuid>>(14)
+    let recurrence = if row.len() > 16 {
+        row.get::<_, Option<serde_json::Value>>(14)
+            .map(|value| {
+                serde_json::from_value::<RecurrenceRule>(value).map_err(|error| {
+                    StorageError::InvalidStoredData(format!("invalid recurrence rule: {error}"))
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let tag_index = if row.len() > 16 { 15 } else { 14 };
+    let dependency_index = if row.len() > 16 { 16 } else { 15 };
+    let tag_ids = if row.len() > tag_index {
+        row.get::<_, Vec<Uuid>>(tag_index)
             .into_iter()
             .map(TagId::from_uuid)
             .collect()
     } else {
         Vec::new()
     };
-    let dependency_ids = if row.len() > 15 {
-        row.get::<_, Vec<Uuid>>(15)
+    let dependency_ids = if row.len() > dependency_index {
+        row.get::<_, Vec<Uuid>>(dependency_index)
             .into_iter()
             .map(TodoId::from_uuid)
             .collect()
@@ -1428,6 +1497,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
         id,
         title: row.get(2),
         due,
+        recurrence,
         priority,
         project_id,
         tag_ids,

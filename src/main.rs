@@ -495,6 +495,7 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
         title: args.title.clone(),
         priority: args.priority,
         due,
+        recurrence: None,
         notes,
         project_id,
         parent_id,

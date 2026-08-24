@@ -141,6 +141,7 @@ pub struct TodoEdit {
     pub title: Option<String>,
     pub priority: Option<Priority>,
     pub due: Option<TodoDue>,
+    pub recurrence: Option<Option<crate::domain::todo::RecurrenceRule>>,
     pub notes: Option<Option<String>>,
     /// `None` preserves the existing project; `Some(None)` clears it.
     pub project_id: Option<Option<ProjectId>>,
@@ -157,6 +158,7 @@ impl TodoEdit {
         self.title.is_none()
             && self.priority.is_none()
             && self.due.is_none()
+            && self.recurrence.is_none()
             && self.notes.is_none()
             && self.project_id.is_none()
             && self.parent_id.is_none()
@@ -295,13 +297,14 @@ impl fmt::Display for EventProjection {
     }
 }
 
-/// Stable query projection for todo output. Dependency state remains absent
-/// until its persistence boundary is implemented.
+/// Stable query projection for todo output. Recurrence, dependency, tag, and
+/// hierarchy state are included when present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TodoQueryProjection {
     pub id: TodoId,
     pub title: String,
     pub due: Option<TodoDue>,
+    pub recurrence: Option<crate::domain::todo::RecurrenceRule>,
     pub priority: crate::domain::todo::Priority,
     pub project_id: Option<crate::domain::todo::ProjectId>,
     pub tag_ids: Vec<TagId>,
@@ -321,6 +324,7 @@ impl From<Todo> for TodoQueryProjection {
             id: todo.id,
             title: todo.title,
             due: todo.due,
+            recurrence: todo.recurrence,
             priority: todo.priority,
             project_id: todo.project_id,
             tag_ids: todo.tag_ids,

@@ -2,7 +2,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Offset, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Months, NaiveDate, Offset, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +32,18 @@ pub enum TodoError {
     InvalidTimezone { timezone: String },
     #[error("due value offset does not match IANA timezone '{timezone}' at that instant")]
     OffsetTimezoneMismatch { timezone: String },
+    #[error("recurrence interval must be between 1 and 366")]
+    InvalidRecurrenceInterval,
+    #[error("recurrence count must be between 1 and 1000")]
+    InvalidRecurrenceCount,
+    #[error("recurrence until must be after the todo due value")]
+    RecurrenceUntilNotAfterDue,
+    #[error("recurrence rule requires a due value")]
+    RecurrenceWithoutDue,
+    #[error("recurrence expansion range is invalid")]
+    InvalidRecurrenceRange,
+    #[error("stored recurrence rule is invalid: {reason}")]
+    InvalidStoredRecurrence { reason: String },
 }
 
 macro_rules! todo_id {
@@ -214,6 +226,53 @@ pub enum TodoDue {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RecurrenceFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecurrenceRule {
+    pub frequency: RecurrenceFrequency,
+    pub interval: u32,
+    pub count: Option<u32>,
+    pub until: Option<NaiveDate>,
+}
+
+impl RecurrenceRule {
+    pub fn new(
+        frequency: RecurrenceFrequency,
+        interval: u32,
+        count: Option<u32>,
+        until: Option<NaiveDate>,
+    ) -> Result<Self, TodoError> {
+        let rule = Self {
+            frequency,
+            interval,
+            count,
+            until,
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    pub fn validate(&self) -> Result<(), TodoError> {
+        if !(1..=366).contains(&self.interval) {
+            return Err(TodoError::InvalidRecurrenceInterval);
+        }
+        if self.count.is_some_and(|count| !(1..=1000).contains(&count)) {
+            return Err(TodoError::InvalidRecurrenceCount);
+        }
+        if self.count.is_none() && self.until.is_none() {
+            return Err(TodoError::InvalidRecurrenceCount);
+        }
+        Ok(())
+    }
+}
+
 impl TodoDue {
     /// Construct a civil-date due value in an IANA timezone.
     ///
@@ -266,6 +325,7 @@ pub struct Todo {
     pub id: TodoId,
     pub title: String,
     pub due: Option<TodoDue>,
+    pub recurrence: Option<RecurrenceRule>,
     pub priority: Priority,
     pub project_id: Option<ProjectId>,
     pub tag_ids: Vec<TagId>,
@@ -291,6 +351,7 @@ impl Todo {
             id: TodoId::new(),
             title,
             due: None,
+            recurrence: None,
             priority: Priority::None,
             project_id: None,
             tag_ids: Vec::new(),
@@ -310,10 +371,54 @@ impl Todo {
     /// Returns an error when the title is empty or contains control characters.
     pub fn rehydrate(mut self) -> Result<Self, TodoError> {
         self.title = valid_text("todo title", self.title)?;
+        if let Some(rule) = &self.recurrence {
+            rule.validate()?;
+            validate_recurrence_due(self.due.as_ref(), rule)?;
+        }
         if self.version < 1 {
             self.version = 1;
         }
         Ok(self)
+    }
+
+    /// Expand due instances in a bounded inclusive date range. The stored base
+    /// todo is never changed.
+    pub fn expand_due_instances(
+        &self,
+        from: NaiveDate,
+        through: NaiveDate,
+    ) -> Result<Vec<TodoDue>, TodoError> {
+        if from > through {
+            return Err(TodoError::InvalidRecurrenceRange);
+        }
+        let Some(due) = &self.due else {
+            return Ok(Vec::new());
+        };
+        let Some(rule) = &self.recurrence else {
+            return Ok(if from <= due_date(due) && due_date(due) <= through {
+                vec![due.clone()]
+            } else {
+                Vec::new()
+            });
+        };
+        rule.validate()?;
+        validate_recurrence_due(Some(due), rule)?;
+        let mut result = Vec::new();
+        let mut current = due.clone();
+        for occurrence in 0..=1000_u32 {
+            let date = due_date(&current);
+            if date > through || rule.until.is_some_and(|until| date > until) {
+                break;
+            }
+            if date >= from {
+                result.push(current.clone());
+            }
+            if rule.count.is_some_and(|count| occurrence + 1 >= count) {
+                break;
+            }
+            current = add_recurrence_step(&current, rule)?;
+        }
+        Ok(result)
     }
     #[must_use]
     pub fn projection(&self, blocked: bool, unmet_prerequisite_count: usize) -> TodoProjection {
@@ -321,6 +426,64 @@ impl Todo {
             todo: self.clone(),
             blocked,
             unmet_prerequisite_count,
+        }
+    }
+}
+
+fn due_date(due: &TodoDue) -> NaiveDate {
+    match due {
+        TodoDue::Date { date, .. } => *date,
+        TodoDue::Timed { at, .. } => at.date_naive(),
+    }
+}
+
+fn validate_recurrence_due(due: Option<&TodoDue>, rule: &RecurrenceRule) -> Result<(), TodoError> {
+    let Some(due) = due else {
+        return Err(TodoError::RecurrenceWithoutDue);
+    };
+    if rule.until.is_some_and(|until| until <= due_date(due)) {
+        return Err(TodoError::RecurrenceUntilNotAfterDue);
+    }
+    Ok(())
+}
+
+fn add_recurrence_step(due: &TodoDue, rule: &RecurrenceRule) -> Result<TodoDue, TodoError> {
+    let amount = rule.interval;
+    match due {
+        TodoDue::Date { date, timezone } => {
+            let next = match rule.frequency {
+                RecurrenceFrequency::Daily => {
+                    date.checked_add_signed(Duration::days(i64::from(amount)))
+                }
+                RecurrenceFrequency::Weekly => {
+                    date.checked_add_signed(Duration::weeks(i64::from(amount)))
+                }
+                RecurrenceFrequency::Monthly => date.checked_add_months(Months::new(amount)),
+            }
+            .ok_or(TodoError::InvalidRecurrenceRange)?;
+            TodoDue::date(next, timezone.clone())
+        }
+        TodoDue::Timed { at, timezone } => {
+            let zone = timezone
+                .parse::<Tz>()
+                .map_err(|_| TodoError::InvalidTimezone {
+                    timezone: timezone.clone(),
+                })?;
+            let local = at.with_timezone(&zone);
+            let next_local = match rule.frequency {
+                RecurrenceFrequency::Daily => {
+                    local.checked_add_signed(Duration::days(i64::from(amount)))
+                }
+                RecurrenceFrequency::Weekly => {
+                    local.checked_add_signed(Duration::weeks(i64::from(amount)))
+                }
+                RecurrenceFrequency::Monthly => local.checked_add_months(Months::new(amount)),
+            }
+            .ok_or(TodoError::InvalidRecurrenceRange)?;
+            TodoDue::timed(
+                next_local.with_timezone(&next_local.offset().fix()),
+                timezone.clone(),
+            )
         }
     }
 }
