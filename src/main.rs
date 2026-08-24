@@ -6,7 +6,8 @@ use std::str::FromStr;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
-    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError, TodoUseCases,
+    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError, TodoEdit,
+    TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::{Priority, TodoDue, TodoId};
@@ -121,6 +122,8 @@ enum TodoCommand {
         #[arg(long)]
         version: i64,
     },
+    /// Edit live core fields using its current optimistic-lock version.
+    Edit(TodoEditArgs),
     /// Trash one live todo using its current optimistic-lock version.
     Trash {
         #[arg(long)]
@@ -149,6 +152,28 @@ struct TodoCreateArgs {
     due_at: Option<DateTime<FixedOffset>>,
     #[arg(long)]
     timezone: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct TodoEditArgs {
+    #[arg(long)]
+    todo_id: TodoId,
+    #[arg(long)]
+    version: i64,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long)]
+    priority: Option<Priority>,
+    #[arg(long, conflicts_with = "due_at")]
+    due_date: Option<NaiveDate>,
+    #[arg(long, conflicts_with = "due_date")]
+    due_at: Option<DateTime<FixedOffset>>,
+    #[arg(long)]
+    timezone: Option<String>,
+    #[arg(long, conflicts_with = "clear_notes")]
+    notes: Option<String>,
+    #[arg(long, conflicts_with = "notes")]
+    clear_notes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -362,6 +387,43 @@ fn todo_due(args: &TodoCreateArgs, no_input: bool) -> Result<Option<TodoDue>, Ap
     }
 }
 
+fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
+    let due = if args.due_date.is_none() && args.due_at.is_none() {
+        if args.timezone.is_some() {
+            return Err(AppError::InvalidInput(
+                "--timezone requires --due-date or --due-at".to_owned(),
+            ));
+        }
+        None
+    } else {
+        let timezone = args.timezone.clone().ok_or_else(|| {
+            AppError::InvalidInput("--due-date or --due-at requires --timezone".to_owned())
+        })?;
+        match (args.due_date, args.due_at) {
+            (Some(date), None) => Some(TodoDue::date(date, timezone)?),
+            (None, Some(at)) => Some(TodoDue::timed(at, timezone)?),
+            _ => unreachable!("clap prevents both todo due forms"),
+        }
+    };
+    let notes = if args.clear_notes {
+        Some(None)
+    } else {
+        args.notes.clone().map(Some)
+    };
+    let edit = TodoEdit {
+        title: args.title.clone(),
+        priority: args.priority,
+        due,
+        notes,
+    };
+    if edit.is_empty() {
+        return Err(AppError::InvalidInput(
+            "todo edit requires at least one editable field".to_owned(),
+        ));
+    }
+    Ok(edit)
+}
+
 fn application_error(error: ApplicationError<StorageError>) -> AppError {
     match error {
         ApplicationError::Domain(error) => AppError::Domain(error),
@@ -497,6 +559,17 @@ async fn run_todo_command(
                 .await
                 .map_err(application_error)?,
         ),
+        TodoCommand::Edit(args) => {
+            let edit = todo_edit(args)?;
+            print_projection(
+                json,
+                "todo.edit",
+                TodoUseCases::new(PostgresTodoRepository::new(database))
+                    .edit_todo_async(args.todo_id, args.version, edit)
+                    .await
+                    .map_err(application_error)?,
+            )
+        }
         TodoCommand::Trash { todo_id, version } => print_projection(
             json,
             "todo.trash",

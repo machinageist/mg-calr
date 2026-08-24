@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
+use crate::application::TodoEdit;
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
@@ -609,6 +610,75 @@ impl PostgresTodoRepository {
         transaction.commit().await.map_err(StorageError::Query)?;
         Ok(todo)
     }
+
+    /// Edit live core fields atomically when the caller's version is current.
+    ///
+    /// # Errors
+    /// Returns a database error, not-found error, or optimistic version conflict.
+    pub async fn edit_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+        edit: TodoEdit,
+    ) -> Result<Todo, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let (due_changed, due_date, due_at, timezone) = match edit.due {
+            Some(TodoDue::Date { date, timezone }) => (true, Some(date), None, Some(timezone)),
+            Some(TodoDue::Timed { at, timezone }) => {
+                (true, None, Some(at.with_timezone(&Utc)), Some(timezone))
+            }
+            None => (false, None, None, None),
+        };
+        let priority = edit.priority.map(|value| value.to_string());
+        let title = edit.title;
+        let notes_changed = edit.notes.is_some();
+        let notes = edit.notes.flatten();
+        let row = transaction
+            .query_opt(
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = row else {
+            return todo_edit_conflict(&transaction, id, expected_version).await;
+        };
+        let todo = todo_from_row(&row)?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(todo)
+    }
+}
+
+async fn todo_edit_conflict(
+    transaction: &tokio_postgres::Transaction<'_>,
+    id: TodoId,
+    expected_version: i64,
+) -> Result<Todo, StorageError> {
+    let state = transaction
+        .query_opt(
+            "SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1",
+            &[&id.as_uuid()],
+        )
+        .await
+        .map_err(StorageError::Query)?;
+    match state {
+        Some(row)
+            if row
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(1)
+                .is_none()
+                && row
+                    .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                    .is_none() =>
+        {
+            Err(StorageError::TodoVersionConflict {
+                todo_id: id,
+                expected_version,
+                actual_version: row.get(0),
+            })
+        }
+        _ => Err(StorageError::TodoNotFound { todo_id: id }),
+    }
 }
 
 async fn todo_lifecycle_conflict(
@@ -690,6 +760,14 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
         expected_version: i64,
     ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
         Box::pin(async move { Self::restore_todo(self, id, expected_version).await })
+    }
+    fn edit_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+        edit: TodoEdit,
+    ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
+        Box::pin(async move { Self::edit_todo(self, id, expected_version, edit).await })
     }
 }
 

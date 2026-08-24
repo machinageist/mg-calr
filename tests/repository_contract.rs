@@ -72,6 +72,18 @@ fn todo_complete_contract_is_parameterized_and_version_guarded() {
 }
 
 #[test]
+fn todo_edit_contract_is_atomic_parameterized_and_preserves_unspecified_fields() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("UPDATE todos SET title = COALESCE($3, title)"));
+    assert!(source.contains("due_date = CASE WHEN $5 THEN $6 ELSE due_date END"));
+    assert!(source.contains("notes = CASE WHEN $9 THEN $10 ELSE notes END"));
+    assert!(source.contains("version = version + 1, updated_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2"));
+    assert!(source.contains("todo_edit_conflict"));
+}
+
+#[test]
 fn todo_trash_and_restore_contracts_are_atomic_and_legacy_safe() {
     let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
 

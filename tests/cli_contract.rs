@@ -256,6 +256,81 @@ fn todo_complete_requires_id_and_version_without_database_access() {
 }
 
 #[test]
+fn todo_edit_requires_id_and_version_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["--json", "--no-input", "todo", "edit"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--todo-id"));
+}
+
+#[test]
+fn todo_edit_requires_at_least_one_field_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("at least one editable field"));
+}
+
+#[test]
+fn todo_edit_matches_create_due_timezone_validation_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--title",
+            "Updated",
+            "--timezone",
+            "America/Los_Angeles",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("requires --due-date or --due-at"));
+}
+
+#[test]
+fn todo_edit_rejects_mixed_due_forms_at_clap_boundary() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--due-date",
+            "2026-08-24",
+            "--due-at",
+            "2026-08-24T09:00:00-07:00",
+            "--timezone",
+            "America/Los_Angeles",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn todo_trash_and_restore_require_id_and_version_without_database_access() {
     for command in ["trash", "restore"] {
         cargo_bin_cmd!("mg-calr")

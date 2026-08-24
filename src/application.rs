@@ -96,6 +96,33 @@ pub trait AsyncTodoRepository {
         id: TodoId,
         expected_version: i64,
     ) -> RepositoryFuture<'_, Todo, Self::Error>;
+    /// # Errors
+    /// Returns a typed persistence, not-found, or optimistic-lock error.
+    fn edit_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+        edit: TodoEdit,
+    ) -> RepositoryFuture<'_, Todo, Self::Error>;
+}
+
+/// The explicitly supplied fields for one optimistic todo edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoEdit {
+    pub title: Option<String>,
+    pub priority: Option<Priority>,
+    pub due: Option<TodoDue>,
+    pub notes: Option<Option<String>>,
+}
+
+impl TodoEdit {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.priority.is_none()
+            && self.due.is_none()
+            && self.notes.is_none()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -359,6 +386,34 @@ where
     ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
         self.repository
             .restore_todo(todo_id, expected_version)
+            .await
+            .map(TodoQueryProjection::from)
+            .map_err(ApplicationError::Repository)
+    }
+
+    /// Edit explicitly supplied core fields using the caller's optimistic version.
+    ///
+    /// # Errors
+    /// Returns validation or repository persistence, not-found, or conflict errors.
+    pub async fn edit_todo_async(
+        &self,
+        todo_id: TodoId,
+        expected_version: i64,
+        edit: TodoEdit,
+    ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
+        if edit.is_empty() {
+            return Err(ApplicationError::Todo(
+                crate::domain::todo::TodoError::EmptyField {
+                    field: "editable field",
+                },
+            ));
+        }
+        if let Some(title) = &edit.title {
+            // Reuse the domain's canonical title validation without duplicating it here.
+            Todo::new(title.clone())?;
+        }
+        self.repository
+            .edit_todo(todo_id, expected_version, edit)
             .await
             .map(TodoQueryProjection::from)
             .map_err(ApplicationError::Repository)
