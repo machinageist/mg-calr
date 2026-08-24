@@ -341,3 +341,23 @@ fn todo_trash_and_restore_require_id_and_version_without_database_access() {
             .stderr(predicate::str::contains("--todo-id"));
     }
 }
+
+#[test]
+fn no_input_project_create_reports_missing_name_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "project",
+            "create",
+        ])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains(
+            "\"code\":\"required_input_missing\"",
+        ))
+        .stderr(predicate::str::contains("project name"));
+}

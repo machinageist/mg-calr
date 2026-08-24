@@ -38,3 +38,18 @@ fn malformed_identifier_returns_typed_error() {
         DomainError::InvalidIdentifier { kind: "event", .. }
     ));
 }
+
+#[test]
+fn project_names_validate_and_normalize() {
+    use mg_calr::domain::todo::{Project, ProjectId};
+
+    let project = Project::new("  Work  ").unwrap();
+    assert_eq!(project.name, "  Work  ");
+    assert_eq!(project.normalized_name, "  work  ");
+    assert_eq!(project.version, 1);
+    assert_eq!(
+        ProjectId::from_str(&project.id.to_string()).unwrap(),
+        project.id
+    );
+    assert!(Project::new("\n").is_err());
+}

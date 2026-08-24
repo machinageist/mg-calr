@@ -6,14 +6,15 @@ use std::str::FromStr;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
-    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError, TodoEdit,
-    TodoUseCases,
+    ApplicationError, CalendarProjection, EventProjection, EventUseCases, ProjectUseCases,
+    QueryError, TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::{Priority, TodoDue, TodoId};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
 use mg_calr::storage::{
-    self, MigrationState, PostgresCalendarEventRepository, PostgresTodoRepository, StorageError,
+    self, MigrationState, PostgresCalendarEventRepository, PostgresProjectRepository,
+    PostgresTodoRepository, StorageError,
 };
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
 use serde::Serialize;
@@ -50,6 +51,8 @@ enum Command {
     Event(EventArgs),
     /// Create and query todos.
     Todo(TodoArgs),
+    /// Create and list projects.
+    Project(ProjectArgs),
 }
 
 #[derive(Debug, Args)]
@@ -96,6 +99,20 @@ enum EventCommand {
         #[arg(long)]
         timezone: String,
     },
+}
+
+#[derive(Debug, Args)]
+struct ProjectArgs {
+    #[command(subcommand)]
+    command: ProjectCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Create a project. Missing name is prompted unless --no-input is set.
+    Create { name: Option<String> },
+    /// List live projects in stable order.
+    List,
 }
 
 #[derive(Debug, Args)]
@@ -436,6 +453,9 @@ fn query_error(error: QueryError<StorageError>) -> AppError {
     match error {
         QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
         QueryError::TodoNotFound { todo_id } => AppError::TodoNotFound { todo_id },
+        QueryError::ProjectNotFound { project_id } => {
+            AppError::InvalidInput(format!("project {project_id} was not found"))
+        }
         QueryError::InvalidTimezone { .. } | QueryError::InvalidDayBoundary { .. } => {
             AppError::InvalidInput(error.to_string())
         }
@@ -515,6 +535,32 @@ async fn run_event_command(
             app.day_agenda_async(*date, timezone)
                 .await
                 .map_err(query_error)?,
+        ),
+    }
+}
+
+async fn run_project_command(
+    args: &ProjectArgs,
+    database: config::ConnectionSettings,
+    json: bool,
+    no_input: bool,
+) -> Result<(), AppError> {
+    let app = ProjectUseCases::new(PostgresProjectRepository::new(database));
+    match &args.command {
+        ProjectCommand::Create { name } => {
+            let name = required(name.clone(), no_input, "project name", "Project name")?;
+            print_projection(
+                json,
+                "project.create",
+                app.create_project_async(name)
+                    .await
+                    .map_err(application_error)?,
+            )
+        }
+        ProjectCommand::List => print_projections(
+            json,
+            "project.list",
+            app.list_projects_async().await.map_err(query_error)?,
         ),
     }
 }
@@ -668,6 +714,9 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }
         Command::Todo(todo) => {
             run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
+        }
+        Command::Project(project) => {
+            run_project_command(project, app_config.database, cli.json, cli.no_input).await
         }
     }
 }

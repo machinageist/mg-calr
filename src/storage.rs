@@ -10,7 +10,7 @@ use crate::application::TodoEdit;
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
-    todo::{Priority, ProjectId, Todo, TodoDue, TodoId},
+    todo::{Priority, Project, ProjectId, Todo, TodoDue, TodoId},
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
@@ -447,6 +447,59 @@ impl PostgresCalendarEventRepository {
     }
 }
 
+/// PostgreSQL-backed repository for project metadata.
+#[derive(Debug, Clone)]
+pub struct PostgresProjectRepository {
+    settings: ConnectionSettings,
+}
+
+impl PostgresProjectRepository {
+    #[must_use]
+    pub const fn new(settings: ConnectionSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Insert one project row in a transaction.
+    ///
+    /// # Errors
+    /// Returns connection or PostgreSQL errors.
+    pub async fn save_project(&self, project: &Project) -> Result<(), StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        transaction.execute(
+            "INSERT INTO projects (id, name, normalized_name, archived_at, version, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[&project.id.as_uuid(), &project.name, &project.normalized_name,
+              &project.archived_at, &project.version, &project.created_at, &project.updated_at],
+        ).await.map_err(StorageError::Query)?;
+        transaction.commit().await.map_err(StorageError::Query)
+    }
+
+    /// Find one project, including archived rows.
+    ///
+    /// # Errors
+    /// Returns connection, query, or invalid stored-data errors.
+    pub async fn find_project(&self, id: ProjectId) -> Result<Option<Project>, StorageError> {
+        let (client, _connection_task) = connect(&self.settings).await?;
+        client.query_opt(
+            "SELECT id, name, normalized_name, archived_at, version, created_at, updated_at FROM projects WHERE id = $1",
+            &[&id.as_uuid()],
+        ).await.map_err(StorageError::Query)?.as_ref().map(project_from_row).transpose()
+    }
+
+    /// List live projects in deterministic name/ID order.
+    ///
+    /// # Errors
+    /// Returns connection, query, or invalid stored-data errors.
+    pub async fn list_projects(&self) -> Result<Vec<Project>, StorageError> {
+        let (client, _connection_task) = connect(&self.settings).await?;
+        let rows = client.query(
+            "SELECT id, name, normalized_name, archived_at, version, created_at, updated_at FROM projects WHERE archived_at IS NULL ORDER BY normalized_name, id",
+            &[],
+        ).await.map_err(StorageError::Query)?;
+        rows.iter().map(project_from_row).collect()
+    }
+}
+
 /// PostgreSQL-backed repository for todo persistence. Tag writes are deferred
 /// from this bounded slice; the core row is authoritative in PostgreSQL.
 #[derive(Debug, Clone)]
@@ -771,6 +824,28 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
     }
 }
 
+impl crate::application::AsyncProjectRepository for PostgresProjectRepository {
+    type Error = StorageError;
+
+    fn save_project<'a>(
+        &'a self,
+        project: &'a Project,
+    ) -> crate::application::RepositoryFuture<'a, (), Self::Error> {
+        Box::pin(async move { Self::save_project(self, project).await })
+    }
+
+    fn find_project(
+        &self,
+        id: ProjectId,
+    ) -> crate::application::RepositoryFuture<'_, Option<Project>, Self::Error> {
+        Box::pin(async move { Self::find_project(self, id).await })
+    }
+
+    fn list_projects(&self) -> crate::application::RepositoryFuture<'_, Vec<Project>, Self::Error> {
+        Box::pin(async move { Self::list_projects(self).await })
+    }
+}
+
 impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventRepository {
     type Error = StorageError;
 
@@ -850,6 +925,23 @@ struct ExtensionProperties {
     organizer: Option<String>,
     #[serde(default)]
     attendees: Vec<String>,
+}
+
+fn project_from_row(row: &Row) -> Result<Project, StorageError> {
+    let id = row.get::<_, Uuid>(0).to_string().parse().map_err(|error| {
+        StorageError::InvalidStoredData(format!("invalid project identifier: {error}"))
+    })?;
+    Project {
+        id,
+        name: row.get(1),
+        normalized_name: row.get(2),
+        archived_at: row.get(3),
+        version: row.get(4),
+        created_at: row.get(5),
+        updated_at: row.get(6),
+    }
+    .rehydrate()
+    .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
 }
 
 fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {

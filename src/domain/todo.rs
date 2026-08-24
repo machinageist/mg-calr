@@ -19,6 +19,8 @@ pub enum TodoError {
     EmptyField { field: &'static str },
     #[error("{field} must not contain control characters")]
     ControlCharacter { field: &'static str },
+    #[error("invalid persisted project data: {reason}")]
+    InvalidStoredProject { reason: String },
     #[error("invalid priority '{value}'; expected none, low, medium, high, or urgent")]
     InvalidPriority { value: String },
     #[error("due value requires an IANA timezone")]
@@ -73,6 +75,57 @@ macro_rules! todo_id {
 todo_id!(TodoId, "todo");
 todo_id!(ProjectId, "project");
 todo_id!(TagId, "tag");
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: ProjectId,
+    pub name: String,
+    pub normalized_name: String,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Project {
+    /// Create a live project with a deterministic normalized-name key.
+    ///
+    /// # Errors
+    /// Returns an error when the name is empty or contains control characters.
+    pub fn new(name: impl Into<String>) -> Result<Self, TodoError> {
+        let name = valid_text("project name", name.into())?;
+        let now = Utc::now();
+        Ok(Self {
+            normalized_name: name.to_lowercase(),
+            id: ProjectId::new(),
+            name,
+            archived_at: None,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Revalidate a project loaded from persistence.
+    ///
+    /// # Errors
+    /// Returns an error when the persisted name is invalid.
+    pub fn rehydrate(mut self) -> Result<Self, TodoError> {
+        self.name = valid_text("project name", self.name)?;
+        let expected_normalized_name = self.name.to_lowercase();
+        if self.normalized_name != expected_normalized_name {
+            return Err(TodoError::InvalidStoredProject {
+                reason: "normalized name does not match name".to_owned(),
+            });
+        }
+        if self.version < 1 {
+            return Err(TodoError::InvalidStoredProject {
+                reason: "version must be at least 1".to_owned(),
+            });
+        }
+        Ok(self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

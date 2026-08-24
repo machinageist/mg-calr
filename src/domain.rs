@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod todo;
-pub use todo::TodoId;
+pub use todo::{Project, ProjectId, TodoId};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DomainError {

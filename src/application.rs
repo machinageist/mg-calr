@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::domain::{
     Calendar, CalendarId, DomainError, Event, EventId, EventTime,
-    todo::{Priority, Todo, TodoDue, TodoId},
+    todo::{Priority, Project, ProjectId, Todo, TodoDue, TodoId},
 };
 
 /// Boxed asynchronous repository operation used at the transport boundary.
@@ -106,6 +106,21 @@ pub trait AsyncTodoRepository {
     ) -> RepositoryFuture<'_, Todo, Self::Error>;
 }
 
+/// Asynchronous persistence boundary for project metadata.
+pub trait AsyncProjectRepository {
+    type Error;
+
+    /// # Errors
+    /// Returns the repository's typed persistence error.
+    fn save_project<'a>(&'a self, project: &'a Project) -> RepositoryFuture<'a, (), Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn find_project(&self, id: ProjectId) -> RepositoryFuture<'_, Option<Project>, Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn list_projects(&self) -> RepositoryFuture<'_, Vec<Project>, Self::Error>;
+}
+
 /// The explicitly supplied fields for one optimistic todo edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoEdit {
@@ -141,12 +156,44 @@ pub enum QueryError<E: std::error::Error + 'static> {
     EventNotFound { event_id: EventId },
     #[error("todo {todo_id} was not found")]
     TodoNotFound { todo_id: TodoId },
+    #[error("project {project_id} was not found")]
+    ProjectNotFound { project_id: ProjectId },
     #[error("'{timezone}' is not a valid IANA timezone")]
     InvalidTimezone { timezone: String },
     #[error("the local day boundary for {date} is not representable in {timezone}")]
     InvalidDayBoundary { date: NaiveDate, timezone: String },
     #[error("repository operation failed: {0}")]
     Repository(E),
+}
+
+/// Stable project query projection consumed by both human and JSON renderers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectProjection {
+    pub id: ProjectId,
+    pub name: String,
+    pub archived_at: Option<DateTime<chrono::Utc>>,
+    pub version: i64,
+    pub created_at: DateTime<chrono::Utc>,
+    pub updated_at: DateTime<chrono::Utc>,
+}
+
+impl From<Project> for ProjectProjection {
+    fn from(project: Project) -> Self {
+        Self {
+            id: project.id,
+            name: project.name,
+            archived_at: project.archived_at,
+            version: project.version,
+            created_at: project.created_at,
+            updated_at: project.updated_at,
+        }
+    }
+}
+
+impl fmt::Display for ProjectProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}\t{}", self.id, self.name)
+    }
 }
 
 /// Stable query projection consumed by both human and JSON renderers.
@@ -280,6 +327,67 @@ impl fmt::Display for TodoQueryProjection {
             formatter.write_str("\ttrashed")?;
         }
         Ok(())
+    }
+}
+
+/// Application boundary for project creation and listing.
+pub struct ProjectUseCases<R> {
+    repository: R,
+}
+
+impl<R> ProjectUseCases<R> {
+    #[must_use]
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+}
+
+impl<R> ProjectUseCases<R>
+where
+    R: AsyncProjectRepository,
+    R::Error: std::error::Error + 'static,
+{
+    /// # Errors
+    /// Returns domain validation or repository persistence errors.
+    pub async fn create_project_async(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ProjectProjection, ApplicationError<R::Error>> {
+        let project = Project::new(name)?;
+        self.repository
+            .save_project(&project)
+            .await
+            .map_err(ApplicationError::Repository)?;
+        Ok(ProjectProjection::from(project))
+    }
+
+    /// # Errors
+    /// Returns a repository query error.
+    pub async fn list_projects_async(
+        &self,
+    ) -> Result<Vec<ProjectProjection>, QueryError<R::Error>> {
+        let mut projects = self
+            .repository
+            .list_projects()
+            .await
+            .map_err(QueryError::Repository)?;
+        projects
+            .sort_by_cached_key(|project| (project.normalized_name.clone(), project.id.as_uuid()));
+        Ok(projects.into_iter().map(ProjectProjection::from).collect())
+    }
+
+    /// # Errors
+    /// Returns a repository query error or [`QueryError::ProjectNotFound`].
+    pub async fn show_project_async(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<ProjectProjection, QueryError<R::Error>> {
+        self.repository
+            .find_project(project_id)
+            .await
+            .map_err(QueryError::Repository)?
+            .map(ProjectProjection::from)
+            .ok_or(QueryError::ProjectNotFound { project_id })
     }
 }
 
