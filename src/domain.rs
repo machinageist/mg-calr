@@ -17,8 +17,7 @@ pub enum DomainError {
 
 macro_rules! domain_id {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name(Uuid);
 
         impl $name {
@@ -42,6 +41,25 @@ macro_rules! domain_id {
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 self.0.fmt(formatter)
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.to_string())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                value.parse().map_err(serde::de::Error::custom)
             }
         }
 
