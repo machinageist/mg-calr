@@ -7,8 +7,9 @@ use std::str::FromStr;
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
-    ApplicationError, CalendarProjection, EventProjection, EventUseCases, ProjectUseCases,
-    QueryError, TagUseCases, TodoEdit, TodoUseCases,
+    AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
+    CalendarProjection, EventProjection, EventUseCases, ProjectUseCases, QueryError, TagUseCases,
+    TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
@@ -54,11 +55,36 @@ enum Command {
     Event(EventArgs),
     /// Create and query todos.
     Todo(TodoArgs),
+    /// Query the combined event and todo agenda.
+    Agenda(AgendaArgs),
     /// Create and list projects.
     Project(ProjectArgs),
     Tag(TagArgs),
     /// Open the bounded keyboard-first todo shell.
     Tui,
+}
+
+#[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct AgendaArgs {
+    /// Inclusive first civil date in the query window.
+    #[arg(long)]
+    start: NaiveDate,
+    /// Exclusive last civil date in the query window.
+    #[arg(long)]
+    end: NaiveDate,
+    /// IANA timezone used for local-day boundaries and timed items.
+    #[arg(long)]
+    timezone: String,
+    /// Include completed todos.
+    #[arg(long)]
+    include_completed: bool,
+    /// Include trashed todos (events remain live-only).
+    #[arg(long)]
+    include_trashed: bool,
+    /// Include todos blocked by a live prerequisite.
+    #[arg(long)]
+    include_blocked: bool,
 }
 
 #[derive(Debug, Args)]
@@ -767,6 +793,61 @@ async fn run_todo_command(
     }
 }
 
+async fn run_agenda_command(
+    args: &AgendaArgs,
+    database: config::ConnectionSettings,
+    json: bool,
+) -> Result<(), AppError> {
+    let mut query = AgendaQuery::try_new(args.start, args.end, args.timezone.clone())
+        .map_err(AppError::from)?;
+    if args.start >= args.end {
+        return Err(AppError::InvalidInput(
+            "agenda --start must be before --end (end is exclusive)".to_owned(),
+        ));
+    }
+    query.include_completed = args.include_completed;
+    query.include_trashed = args.include_trashed;
+    query.include_blocked = args.include_blocked;
+
+    let output = AgendaUseCases::new((
+        PostgresCalendarEventRepository::new(database.clone()),
+        PostgresTodoRepository::new(database),
+    ))
+    .query_async(query)
+    .await
+    .map_err(query_error)?;
+    print_agenda(json, output)
+}
+
+fn print_agenda(json: bool, output: AgendaOutput) -> Result<(), AppError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&Envelope::success("agenda", output))?
+        );
+    } else {
+        for item in &output.items {
+            println!("{}", format_agenda_item(item));
+        }
+    }
+    Ok(())
+}
+
+fn format_agenda_item(item: &AgendaItem) -> String {
+    let kind = match item.kind {
+        AgendaKind::Event => "event",
+        AgendaKind::Todo => "todo",
+    };
+    let detail = item.due.as_ref().map_or_else(
+        || format!("event_time={:?}", item.event_time),
+        |due| format!("due={due:?}"),
+    );
+    format!(
+        "{kind}\t{}\t{}\t{detail}\tcompleted={} trashed={} blocked={}",
+        item.id, item.title, item.completed, item.trashed, item.blocked
+    )
+}
+
 async fn run_tui(database: config::ConnectionSettings) -> Result<(), AppError> {
     let load = || async {
         TodoUseCases::new(PostgresTodoRepository::new(database.clone()))
@@ -877,6 +958,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         Command::Todo(todo) => {
             run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
+        Command::Agenda(agenda) => run_agenda_command(agenda, app_config.database, cli.json).await,
         Command::Project(project) => {
             run_project_command(project, app_config.database, cli.json, cli.no_input).await
         }

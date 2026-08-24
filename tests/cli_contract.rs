@@ -12,6 +12,65 @@ fn reminder_scan_contract_is_explicitly_dry_run_capable() {
 }
 
 #[test]
+fn agenda_help_exposes_explicit_window_timezone_and_lifecycle_flags() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["agenda", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--start"))
+        .stdout(predicate::str::contains("--end"))
+        .stdout(predicate::str::contains("--timezone"))
+        .stdout(predicate::str::contains("--include-completed"))
+        .stdout(predicate::str::contains("--include-trashed"))
+        .stdout(predicate::str::contains("--include-blocked"));
+}
+
+#[test]
+fn agenda_rejects_invalid_window_and_timezone_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "agenda",
+            "--start",
+            "2026-08-25",
+            "--end",
+            "2026-08-24",
+            "--timezone",
+            "Not/AZone",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("\"code\":\"invalid_input\""))
+        .stderr(predicate::str::contains("valid IANA timezone"));
+}
+
+#[test]
+fn agenda_rejects_equal_window_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "agenda",
+            "--start",
+            "2026-08-24",
+            "--end",
+            "2026-08-24",
+            "--timezone",
+            "UTC",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains(
+            "agenda --start must be before --end",
+        ));
+}
+
+#[test]
 fn version_json_has_a_stable_envelope() {
     cargo_bin_cmd!("mg-calr")
         .args(["--json", "version"])
