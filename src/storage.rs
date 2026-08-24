@@ -48,6 +48,16 @@ pub struct MigrationState {
 fn postgres_config(settings: &ConnectionSettings) -> Result<tokio_postgres::Config, StorageError> {
     match settings {
         ConnectionSettings::Url { url, .. } => {
+            if let Some(dbname) = url
+                .strip_prefix("postgresql:///")
+                .or_else(|| url.strip_prefix("postgres:///"))
+                && !dbname.is_empty()
+                && !dbname.contains(['/', '?', '#'])
+            {
+                let mut config = tokio_postgres::Config::new();
+                config.host_path("/run/postgresql").dbname(dbname);
+                return Ok(config);
+            }
             url.parse().map_err(StorageError::InvalidConfiguration)
         }
         ConnectionSettings::Peer {
@@ -207,4 +217,30 @@ pub async fn migrate(settings: &ConnectionSettings) -> Result<Vec<MigrationState
 /// Returns the same connection, query, and drift errors as [`migration_status`].
 pub async fn doctor(settings: &ConnectionSettings) -> Result<Vec<MigrationState>, StorageError> {
     migration_status(settings).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use tokio_postgres::config::Host;
+
+    use super::postgres_config;
+    use crate::config::{ConfigSource, ConnectionSettings};
+
+    #[test]
+    fn libpq_local_uri_uses_the_postgresql_socket() {
+        let settings = ConnectionSettings::Url {
+            url: "postgresql:///mg_calr_test".to_owned(),
+            source: ConfigSource::Environment,
+        };
+
+        let config = postgres_config(&settings).expect("valid local URI");
+
+        assert_eq!(config.get_dbname(), Some("mg_calr_test"));
+        assert_eq!(
+            config.get_hosts(),
+            &[Host::Unix(Path::new("/run/postgresql").to_path_buf())]
+        );
+    }
 }
