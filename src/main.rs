@@ -7,11 +7,11 @@ use chrono::{DateTime, FixedOffset, NaiveDate};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     ApplicationError, CalendarProjection, EventProjection, EventUseCases, ProjectUseCases,
-    QueryError, TodoEdit, TodoUseCases,
+    QueryError, TagUseCases, TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
-use mg_calr::domain::todo::{Priority, TodoDue, TodoId};
+use mg_calr::domain::todo::{Priority, TagId, TodoDue, TodoId};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
 use mg_calr::storage::{
     self, MigrationState, PostgresCalendarEventRepository, PostgresProjectRepository,
@@ -54,6 +54,18 @@ enum Command {
     Todo(TodoArgs),
     /// Create and list projects.
     Project(ProjectArgs),
+    Tag(TagArgs),
+}
+
+#[derive(Debug, Args)]
+struct TagArgs {
+    #[command(subcommand)]
+    command: TagCommand,
+}
+#[derive(Debug, Subcommand)]
+enum TagCommand {
+    Create { name: Option<String> },
+    List,
 }
 
 #[derive(Debug, Args)]
@@ -196,6 +208,10 @@ struct TodoEditArgs {
     project_id: Option<ProjectId>,
     #[arg(long, conflicts_with = "project_id")]
     clear_project: bool,
+    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "clear_tags")]
+    tag: Vec<TagId>,
+    #[arg(long, conflicts_with = "tag")]
+    clear_tags: bool,
 }
 
 #[derive(Debug, Args)]
@@ -437,12 +453,20 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
     } else {
         args.project_id.map(Some)
     };
+    let tag_ids = if args.clear_tags {
+        Some(Vec::new())
+    } else if args.tag.is_empty() {
+        None
+    } else {
+        Some(args.tag.clone())
+    };
     let edit = TodoEdit {
         title: args.title.clone(),
         priority: args.priority,
         due,
         notes,
         project_id,
+        tag_ids,
     };
     if edit.is_empty() {
         return Err(AppError::InvalidInput(
@@ -646,6 +670,7 @@ async fn run_todo_command(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
     let app_config = config::load(cli.database_url.clone())?;
@@ -728,6 +753,26 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }
         Command::Project(project) => {
             run_project_command(project, app_config.database, cli.json, cli.no_input).await
+        }
+        Command::Tag(tag) => {
+            let app = TagUseCases::new(storage::PostgresTagRepository::new(app_config.database));
+            match &tag.command {
+                TagCommand::Create { name } => {
+                    let name = required(name.clone(), cli.no_input, "tag name", "Tag name")?;
+                    print_projection(
+                        cli.json,
+                        "tag.create",
+                        app.create_tag_async(name)
+                            .await
+                            .map_err(application_error)?,
+                    )
+                }
+                TagCommand::List => print_projections(
+                    cli.json,
+                    "tag.list",
+                    app.list_tags_async().await.map_err(query_error)?,
+                ),
+            }
         }
     }
 }

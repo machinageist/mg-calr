@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ use crate::application::TodoEdit;
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
-    todo::{Priority, Project, ProjectId, Todo, TodoDue, TodoId},
+    todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId},
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
@@ -52,6 +53,10 @@ pub enum StorageError {
     TodoNotFound { todo_id: TodoId },
     #[error("project {project_id} does not exist or is archived")]
     ProjectNotFound { project_id: ProjectId },
+    #[error("tag '{normalized_name}' already exists")]
+    TagAlreadyExists { normalized_name: String },
+    #[error("tag {tag_id} does not exist")]
+    TagNotFound { tag_id: TagId },
     #[error(
         "todo {todo_id} version conflict: expected {expected_version}, actual {actual_version}"
     )]
@@ -261,7 +266,7 @@ const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0
 
 const TODO_SELECT: &str = "SELECT t.id, t.parent_id, t.title, t.notes, t.due_date, t.due_at, \
     t.timezone, t.priority, t.project_id, t.completed_at, COALESCE(t.trashed_at, t.deleted_at) AS trashed_at, t.version, \
-    t.created_at, t.updated_at FROM todos t";
+    t.created_at, t.updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids FROM todos t";
 const TODO_ORDER: &str = "ORDER BY CASE WHEN t.due_date IS NULL AND t.due_at IS NULL THEN 1 ELSE 0 END, \
     t.due_date NULLS LAST, t.due_at NULLS LAST, lower(t.title), t.id";
 
@@ -449,6 +454,43 @@ impl PostgresCalendarEventRepository {
     }
 }
 
+/// PostgreSQL-backed repository for tag metadata.
+#[derive(Debug, Clone)]
+pub struct PostgresTagRepository {
+    settings: ConnectionSettings,
+}
+impl PostgresTagRepository {
+    pub const fn new(settings: ConnectionSettings) -> Self {
+        Self { settings }
+    }
+    pub async fn save_tag(&self, tag: &Tag) -> Result<(), StorageError> {
+        let (mut client, _) = connect(&self.settings).await?;
+        let tx = client.transaction().await.map_err(StorageError::Query)?;
+        tx.execute("INSERT INTO tags (id, name, normalized_name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)", &[&tag.id.as_uuid(), &tag.name, &tag.normalized_name, &tag.created_at, &tag.updated_at]).await.map_err(|error| {
+            if error
+                .code()
+                .is_some_and(|code| code.code() == "23505")
+                && error
+                    .as_db_error()
+                    .and_then(tokio_postgres::error::DbError::constraint)
+                    .is_some_and(|constraint| constraint == "tags_normalized_name_unique")
+            {
+                StorageError::TagAlreadyExists {
+                    normalized_name: tag.normalized_name.clone(),
+                }
+            } else {
+                StorageError::Query(error)
+            }
+        })?;
+        tx.commit().await.map_err(StorageError::Query)
+    }
+    pub async fn list_tags(&self) -> Result<Vec<Tag>, StorageError> {
+        let (client, _) = connect(&self.settings).await?;
+        let rows = client.query("SELECT id, name, normalized_name, created_at, updated_at FROM tags ORDER BY normalized_name, id", &[]).await.map_err(StorageError::Query)?;
+        rows.iter().map(tag_from_row).collect()
+    }
+}
+
 /// PostgreSQL-backed repository for project metadata.
 #[derive(Debug, Clone)]
 pub struct PostgresProjectRepository {
@@ -502,8 +544,8 @@ impl PostgresProjectRepository {
     }
 }
 
-/// PostgreSQL-backed repository for todo persistence. Tag writes are deferred
-/// from this bounded slice; the core row is authoritative in PostgreSQL.
+/// PostgreSQL-backed repository for todo persistence. Todo rows and their
+/// tag join rows are authoritative in PostgreSQL.
 #[derive(Debug, Clone)]
 pub struct PostgresTodoRepository {
     settings: ConnectionSettings,
@@ -515,7 +557,7 @@ impl PostgresTodoRepository {
         Self { settings }
     }
 
-    /// Insert a todo row in a transaction. Tags are intentionally not written.
+    /// Insert a todo row and its tag join rows in one transaction.
     ///
     /// # Errors
     /// Returns connection or PostgreSQL errors.
@@ -536,6 +578,15 @@ impl PostgresTodoRepository {
               &todo.project_id.map(ProjectId::as_uuid), &todo.completed_at, &todo.trashed_at,
               &todo.version, &todo.created_at, &todo.updated_at],
         ).await.map_err(StorageError::Query)?;
+        for tag_id in &todo.tag_ids {
+            transaction
+                .execute(
+                    "INSERT INTO todo_tags (todo_id, tag_id) VALUES ($1, $2)",
+                    &[&todo.id.as_uuid(), &tag_id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+        }
         transaction.commit().await.map_err(StorageError::Query)
     }
 
@@ -584,7 +635,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -626,7 +677,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -653,7 +704,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -670,6 +721,7 @@ impl PostgresTodoRepository {
     ///
     /// # Errors
     /// Returns a database error, not-found error, or optimistic version conflict.
+    #[allow(clippy::too_many_lines)]
     pub async fn edit_todo(
         &self,
         id: TodoId,
@@ -691,6 +743,53 @@ impl PostgresTodoRepository {
         let notes = edit.notes.flatten();
         let project_changed = edit.project_id.is_some();
         let project_id = edit.project_id.flatten().map(ProjectId::as_uuid);
+        let tag_ids = edit.tag_ids.clone().map(|ids| {
+            let mut ids = ids.into_iter().map(TagId::as_uuid).collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        });
+        let current = transaction
+            .query_opt(
+                "SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1 FOR UPDATE",
+                &[&id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(current) = current else {
+            return Err(StorageError::TodoNotFound { todo_id: id });
+        };
+        if current
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>(1)
+            .is_some()
+            || current
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                .is_some()
+        {
+            return Err(StorageError::TodoNotFound { todo_id: id });
+        }
+        let actual_version = current.get::<_, i64>(0);
+        if actual_version != expected_version {
+            return Err(StorageError::TodoVersionConflict {
+                todo_id: id,
+                expected_version,
+                actual_version,
+            });
+        }
+        if let Some(ids) = &tag_ids {
+            for tag_id in ids {
+                if transaction
+                    .query_opt("SELECT id FROM tags WHERE id = $1 FOR UPDATE", &[tag_id])
+                    .await
+                    .map_err(StorageError::Query)?
+                    .is_none()
+                {
+                    return Err(StorageError::TagNotFound {
+                        tag_id: TagId::from_uuid(*tag_id),
+                    });
+                }
+            }
+        }
         if let Some(project_id) = project_id {
             let project_is_live = transaction
                 .query_opt(
@@ -708,7 +807,7 @@ impl PostgresTodoRepository {
         }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id],
             )
             .await
@@ -716,7 +815,23 @@ impl PostgresTodoRepository {
         let Some(row) = row else {
             return todo_edit_conflict(&transaction, id, expected_version).await;
         };
-        let todo = todo_from_row(&row)?;
+        let mut todo = todo_from_row(&row)?;
+        if let Some(ids) = tag_ids {
+            transaction
+                .execute("DELETE FROM todo_tags WHERE todo_id = $1", &[&id.as_uuid()])
+                .await
+                .map_err(StorageError::Query)?;
+            for tag_id in &ids {
+                transaction
+                    .execute(
+                        "INSERT INTO todo_tags (todo_id, tag_id) VALUES ($1, $2)",
+                        &[&id.as_uuid(), tag_id],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?;
+            }
+            todo.tag_ids = ids.into_iter().map(TagId::from_uuid).collect();
+        }
         transaction.commit().await.map_err(StorageError::Query)?;
         Ok(todo)
     }
@@ -843,6 +958,19 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
     }
 }
 
+impl crate::application::AsyncTagRepository for PostgresTagRepository {
+    type Error = StorageError;
+    fn save_tag<'a>(
+        &'a self,
+        tag: &'a Tag,
+    ) -> crate::application::RepositoryFuture<'a, (), Self::Error> {
+        Box::pin(async move { Self::save_tag(self, tag).await })
+    }
+    fn list_tags(&self) -> crate::application::RepositoryFuture<'_, Vec<Tag>, Self::Error> {
+        Box::pin(async move { Self::list_tags(self).await })
+    }
+}
+
 impl crate::application::AsyncProjectRepository for PostgresProjectRepository {
     type Error = StorageError;
 
@@ -946,6 +1074,18 @@ struct ExtensionProperties {
     attendees: Vec<String>,
 }
 
+fn tag_from_row(row: &Row) -> Result<Tag, StorageError> {
+    Tag {
+        id: TagId::from_uuid(row.get(0)),
+        name: row.get(1),
+        normalized_name: row.get(2),
+        created_at: row.get(3),
+        updated_at: row.get(4),
+    }
+    .rehydrate()
+    .map_err(|e| StorageError::InvalidStoredData(e.to_string()))
+}
+
 fn project_from_row(row: &Row) -> Result<Project, StorageError> {
     let id = row.get::<_, Uuid>(0).to_string().parse().map_err(|error| {
         StorageError::InvalidStoredData(format!("invalid project identifier: {error}"))
@@ -1005,6 +1145,14 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     }
     .transpose()
     .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+    let tag_ids = if row.len() > 14 {
+        row.get::<_, Vec<Uuid>>(14)
+            .into_iter()
+            .map(TagId::from_uuid)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let priority = row
         .get::<_, String>(7)
         .parse::<Priority>()
@@ -1015,7 +1163,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
         due,
         priority,
         project_id,
-        tag_ids: Vec::new(),
+        tag_ids,
         notes: row.get(3),
         parent_id,
         completed_at: row.get(9),
@@ -1145,7 +1293,7 @@ mod tests {
         let todo = Todo::new("Stable output").expect("valid todo");
         let value = serde_json::to_value(TodoQueryProjection::from(todo)).expect("serializable");
         assert_eq!(value["title"], "Stable output");
-        assert!(value.get("tag_ids").is_none());
+        assert!(value["tag_ids"].is_array());
         assert!(value.get("version").is_some());
     }
 }

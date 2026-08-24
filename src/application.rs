@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc)]
 use std::cmp::Ordering;
 use std::fmt;
 use std::future::Future;
@@ -10,7 +11,7 @@ use thiserror::Error;
 
 use crate::domain::{
     Calendar, CalendarId, DomainError, Event, EventId, EventTime,
-    todo::{Priority, Project, ProjectId, Todo, TodoDue, TodoId},
+    todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId},
 };
 
 /// Boxed asynchronous repository operation used at the transport boundary.
@@ -107,6 +108,12 @@ pub trait AsyncTodoRepository {
 }
 
 /// Asynchronous persistence boundary for project metadata.
+pub trait AsyncTagRepository {
+    type Error;
+    fn save_tag<'a>(&'a self, tag: &'a Tag) -> RepositoryFuture<'a, (), Self::Error>;
+    fn list_tags(&self) -> RepositoryFuture<'_, Vec<Tag>, Self::Error>;
+}
+
 pub trait AsyncProjectRepository {
     type Error;
 
@@ -130,6 +137,7 @@ pub struct TodoEdit {
     pub notes: Option<Option<String>>,
     /// `None` preserves the existing project; `Some(None)` clears it.
     pub project_id: Option<Option<ProjectId>>,
+    pub tag_ids: Option<Vec<TagId>>,
 }
 
 impl TodoEdit {
@@ -140,6 +148,7 @@ impl TodoEdit {
             && self.due.is_none()
             && self.notes.is_none()
             && self.project_id.is_none()
+            && self.tag_ids.is_none()
     }
 }
 
@@ -273,8 +282,8 @@ impl fmt::Display for EventProjection {
     }
 }
 
-/// Stable query projection for todo output. Tags and dependency state are
-/// intentionally absent until their persistence boundaries are implemented.
+/// Stable query projection for todo output. Dependency state remains absent
+/// until its persistence boundary is implemented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TodoQueryProjection {
     pub id: TodoId,
@@ -282,6 +291,7 @@ pub struct TodoQueryProjection {
     pub due: Option<TodoDue>,
     pub priority: crate::domain::todo::Priority,
     pub project_id: Option<crate::domain::todo::ProjectId>,
+    pub tag_ids: Vec<TagId>,
     pub notes: Option<String>,
     pub parent_id: Option<TodoId>,
     pub completed_at: Option<DateTime<chrono::Utc>>,
@@ -299,6 +309,7 @@ impl From<Todo> for TodoQueryProjection {
             due: todo.due,
             priority: todo.priority,
             project_id: todo.project_id,
+            tag_ids: todo.tag_ids,
             notes: todo.notes,
             parent_id: todo.parent_id,
             completed_at: todo.completed_at,
@@ -330,6 +341,63 @@ impl fmt::Display for TodoQueryProjection {
             formatter.write_str("\ttrashed")?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TagProjection {
+    pub id: TagId,
+    pub name: String,
+    pub created_at: DateTime<chrono::Utc>,
+    pub updated_at: DateTime<chrono::Utc>,
+}
+impl From<Tag> for TagProjection {
+    fn from(tag: Tag) -> Self {
+        Self {
+            id: tag.id,
+            name: tag.name,
+            created_at: tag.created_at,
+            updated_at: tag.updated_at,
+        }
+    }
+}
+impl fmt::Display for TagProjection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}\t{}", self.id, self.name)
+    }
+}
+pub struct TagUseCases<R> {
+    repository: R,
+}
+impl<R> TagUseCases<R> {
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+}
+impl<R> TagUseCases<R>
+where
+    R: AsyncTagRepository,
+    R::Error: std::error::Error + 'static,
+{
+    pub async fn create_tag_async(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<TagProjection, ApplicationError<R::Error>> {
+        let tag = Tag::new(name)?;
+        self.repository
+            .save_tag(&tag)
+            .await
+            .map_err(ApplicationError::Repository)?;
+        Ok(TagProjection::from(tag))
+    }
+    pub async fn list_tags_async(&self) -> Result<Vec<TagProjection>, QueryError<R::Error>> {
+        let mut tags = self
+            .repository
+            .list_tags()
+            .await
+            .map_err(QueryError::Repository)?;
+        tags.sort_by_cached_key(|tag| (tag.normalized_name.clone(), tag.id.as_uuid()));
+        Ok(tags.into_iter().map(TagProjection::from).collect())
     }
 }
 

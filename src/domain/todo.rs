@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc)]
 use std::fmt;
 use std::str::FromStr;
 
@@ -21,6 +22,8 @@ pub enum TodoError {
     ControlCharacter { field: &'static str },
     #[error("invalid persisted project data: {reason}")]
     InvalidStoredProject { reason: String },
+    #[error("invalid persisted tag data: {reason}")]
+    InvalidStoredTag { reason: String },
     #[error("invalid priority '{value}'; expected none, low, medium, high, or urgent")]
     InvalidPriority { value: String },
     #[error("due value requires an IANA timezone")]
@@ -81,6 +84,37 @@ todo_id!(ProjectId, "project");
 todo_id!(TagId, "tag");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: TagId,
+    pub name: String,
+    pub normalized_name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Tag {
+    pub fn new(name: impl Into<String>) -> Result<Self, TodoError> {
+        let name = valid_text("tag name", name.into())?;
+        let now = Utc::now();
+        Ok(Self {
+            id: TagId::new(),
+            normalized_name: name.to_lowercase(),
+            name,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+    pub fn rehydrate(mut self) -> Result<Self, TodoError> {
+        self.name = valid_text("tag name", self.name)?;
+        if self.normalized_name != self.name.to_lowercase() {
+            return Err(TodoError::InvalidStoredTag {
+                reason: "tag normalized name does not match name".to_owned(),
+            });
+        }
+        Ok(self)
+    }
+}
+
 pub struct Project {
     pub id: ProjectId,
     pub name: String,

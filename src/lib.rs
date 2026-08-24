@@ -1,3 +1,4 @@
+#![allow(clippy::unnested_or_patterns)]
 pub mod application;
 pub mod config;
 pub mod domain;
@@ -45,6 +46,8 @@ impl AppError {
             Self::Storage(storage::StorageError::TodoNotFound { .. })
             | Self::TodoNotFound { .. } => "todo_not_found",
             Self::Storage(storage::StorageError::ProjectNotFound { .. }) => "project_not_found",
+            Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => "tag_already_exists",
+            Self::Storage(storage::StorageError::TagNotFound { .. }) => "tag_not_found",
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => {
                 "todo_version_conflict"
             }
@@ -63,13 +66,14 @@ impl AppError {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::RequiredInput { .. } | Self::Input(_) => 64,
-            Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => 65,
+            Self::Domain(_)
+            | Self::Todo(_)
+            | Self::InvalidInput(_)
+            | Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
-            | Self::Storage(
-                storage::StorageError::TodoNotFound { .. }
-                | storage::StorageError::ProjectNotFound { .. },
-            ) => 66,
+            | Self::Storage(storage::StorageError::TagNotFound { .. })
+            | Self::Storage(storage::StorageError::ProjectNotFound { .. }) => 66,
             Self::Config(_) => 78,
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => 75,
             Self::Storage(_) => 69,
