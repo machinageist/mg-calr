@@ -117,6 +117,12 @@ pub trait AsyncTodoRepository {
         &self,
         at: DateTime<chrono::Utc>,
     ) -> RepositoryFuture<'_, Vec<Reminder>, Self::Error>;
+    /// Scan due reminders and idempotently record delivery candidates.
+    fn scan_reminders(
+        &self,
+        at: DateTime<chrono::Utc>,
+        dry_run: bool,
+    ) -> RepositoryFuture<'_, Vec<ReminderDelivery>, Self::Error>;
 }
 
 /// Asynchronous persistence boundary for project metadata.
@@ -334,6 +340,18 @@ pub struct Reminder {
     pub trigger_at: DateTime<chrono::Utc>,
     pub minutes_before: u32,
     pub repeatable: bool,
+}
+
+/// One deterministic result from a reminder delivery scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReminderDelivery {
+    pub todo_id: TodoId,
+    pub title: String,
+    pub minutes_before: u32,
+    pub repeatable: bool,
+    pub scheduled_for: DateTime<chrono::Utc>,
+    pub status: String,
+    pub transport: &'static str,
 }
 
 impl From<Todo> for TodoQueryProjection {
@@ -675,6 +693,17 @@ where
     ) -> Result<Vec<Reminder>, QueryError<R::Error>> {
         self.repository
             .due_reminders(at)
+            .await
+            .map_err(QueryError::Repository)
+    }
+
+    pub async fn scan_reminders_async(
+        &self,
+        at: DateTime<chrono::Utc>,
+        dry_run: bool,
+    ) -> Result<Vec<ReminderDelivery>, QueryError<R::Error>> {
+        self.repository
+            .scan_reminders(at, dry_run)
             .await
             .map_err(QueryError::Repository)
     }

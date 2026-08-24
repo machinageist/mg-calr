@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     ApplicationError, CalendarProjection, EventProjection, EventUseCases, ProjectUseCases,
@@ -188,6 +188,13 @@ enum TodoCommand {
     Import {
         #[arg(long)]
         file: PathBuf,
+    },
+    /// Scan due reminders and record delivery candidates without sending notifications.
+    ScanReminders {
+        #[arg(long)]
+        at: DateTime<FixedOffset>,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -646,6 +653,7 @@ async fn run_project_command(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_todo_command(
     args: &TodoArgs,
     database: config::ConnectionSettings,
@@ -747,6 +755,14 @@ async fn run_todo_command(
                 serde_json::json!({ "imported": count }),
             )
         }
+        TodoCommand::ScanReminders { at, dry_run } => print_debug(
+            json,
+            "todo.reminder_scan",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .scan_reminders_async(at.with_timezone(&Utc), *dry_run)
+                .await
+                .map_err(query_error)?,
+        ),
     }
 }
 

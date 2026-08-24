@@ -2,6 +2,16 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 
 #[test]
+fn reminder_scan_contract_is_explicitly_dry_run_capable() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["todo", "scan-reminders", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--at"))
+        .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
 fn version_json_has_a_stable_envelope() {
     cargo_bin_cmd!("mg-calr")
         .args(["--json", "version"])

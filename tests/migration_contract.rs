@@ -50,3 +50,18 @@ fn recurrence_migration_is_parameterized_foundation_and_non_destructive() {
     assert!(TODO_RECURRENCE_MIGRATION.contains("todos_recurrence_rule_check"));
     assert!(!TODO_RECURRENCE_MIGRATION.contains("DROP TABLE"));
 }
+
+#[test]
+fn reminder_migration_bridges_delivery_identity_without_external_transport() {
+    let sql = mg_calr::storage::TODO_REMINDERS_MIGRATION;
+    assert!(sql.contains("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeatable"));
+    assert!(sql.contains("reminders_todo_schedule_unique"));
+    assert!(sql.contains("WITH duplicate_deliveries AS"));
+    assert!(sql.contains("DELETE FROM reminder_deliveries delivery"));
+    assert!(sql.contains("earlier.id < delivery.id"));
+    assert!(sql.contains("UPDATE reminder_deliveries delivery"));
+    assert!(sql.contains("MIN(id::text)::uuid AS keeper_id"));
+    assert!(sql.contains("duplicate.id <> canonical.keeper_id"));
+    assert!(mg_calr::storage::FOUNDATION_MIGRATION.contains("UNIQUE (reminder_id, scheduled_for)"));
+    assert!(!sql.to_ascii_lowercase().contains("notify"));
+}

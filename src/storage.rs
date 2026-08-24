@@ -1,7 +1,7 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
-use crate::application::TodoEdit;
+use crate::application::{ReminderDelivery, TodoEdit};
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
@@ -1477,6 +1477,139 @@ impl PostgresTodoRepository {
             })
             .collect()
     }
+
+    /// Record due todo reminders once. No notification transport is invoked.
+    pub async fn scan_reminders(
+        &self,
+        at: DateTime<Utc>,
+        dry_run: bool,
+    ) -> Result<Vec<ReminderDelivery>, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let query = format!(
+            "{TODO_SELECT} WHERE (t.due_date IS NOT NULL OR t.due_at IS NOT NULL) AND t.completed_at IS NULL AND t.trashed_at IS NULL AND t.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM todo_dependencies dep JOIN todos prerequisite ON prerequisite.id = dep.prerequisite_id WHERE dep.dependent_id = t.id AND prerequisite.completed_at IS NULL AND prerequisite.trashed_at IS NULL AND prerequisite.deleted_at IS NULL)"
+        );
+        let rows = transaction
+            .query(&query, &[])
+            .await
+            .map_err(StorageError::Query)?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let todo = todo_from_row(&row)?;
+            let Some(due) = &todo.due else { continue };
+            let timezone = match due {
+                TodoDue::Date { timezone, .. } | TodoDue::Timed { timezone, .. } => timezone,
+            };
+            let zone = timezone.parse::<Tz>().map_err(|_| {
+                StorageError::InvalidStoredData(format!("invalid todo timezone: {timezone}"))
+            })?;
+            // Reminder offsets are bounded to seven days (10,080 minutes), so
+            // include that much local calendar time beyond the scan instant.
+            // Expanding in the todo's timezone preserves civil-date and DST
+            // semantics while remaining bounded by the domain recurrence cap.
+            let through = at.with_timezone(&zone).date_naive() + chrono::Duration::days(7);
+            let occurrences = todo
+                .expand_due_instances(NaiveDate::MIN, through)
+                .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+            for reminder in &todo.reminders {
+                let selected = if reminder.repeatable {
+                    occurrences.iter().collect::<Vec<_>>()
+                } else {
+                    occurrences.iter().take(1).collect::<Vec<_>>()
+                };
+                for occurrence in selected {
+                    let scheduled_for = due_trigger_at(occurrence, reminder.minutes_before)?;
+                    if scheduled_for <= at {
+                        candidates.push((
+                            todo.id,
+                            todo.title.clone(),
+                            reminder.minutes_before,
+                            reminder.repeatable,
+                            scheduled_for,
+                        ));
+                    }
+                }
+            }
+        }
+        candidates.sort_by_key(|candidate| {
+            (
+                candidate.4,
+                candidate.1.to_lowercase(),
+                candidate.0.as_uuid().as_u128(),
+            )
+        });
+        let mut output = Vec::with_capacity(candidates.len());
+        for (todo_id, title, minutes_before, repeatable, scheduled_for) in candidates {
+            let reminder = transaction.query_opt(
+                "SELECT id FROM reminders WHERE todo_id = $1 AND offset_seconds = $2 AND repeatable = $3",
+                &[&todo_id.as_uuid(), &(i64::from(minutes_before) * 60), &repeatable],
+            ).await.map_err(StorageError::Query)?;
+            let reminder_id = match reminder {
+                Some(row) => row.get(0),
+                None if dry_run => Uuid::nil(),
+                None => transaction.query_one(
+                    "INSERT INTO reminders (id, todo_id, offset_seconds, repeatable) VALUES ($1, $2, $3, $4) ON CONFLICT (todo_id, offset_seconds, repeatable) WHERE todo_id IS NOT NULL AND offset_seconds IS NOT NULL DO UPDATE SET todo_id = EXCLUDED.todo_id RETURNING id",
+                    &[&Uuid::now_v7(), &todo_id.as_uuid(), &(i64::from(minutes_before) * 60), &repeatable],
+                ).await.map_err(StorageError::Query)?.get(0),
+            };
+            let delivery = if dry_run {
+                transaction.query_opt(
+                    "SELECT id FROM reminder_deliveries WHERE reminder_id = $1 AND scheduled_for = $2",
+                    &[&reminder_id, &scheduled_for],
+                ).await.map_err(StorageError::Query)?.is_some()
+            } else {
+                transaction.query_opt(
+                    "INSERT INTO reminder_deliveries (id, reminder_id, scheduled_for) VALUES ($1, $2, $3) ON CONFLICT (reminder_id, scheduled_for) DO NOTHING RETURNING id",
+                    &[&Uuid::now_v7(), &reminder_id, &scheduled_for],
+                ).await.map_err(StorageError::Query)?.is_some()
+            };
+            output.push(ReminderDelivery {
+                todo_id,
+                title,
+                minutes_before,
+                repeatable,
+                scheduled_for,
+                status: if delivery {
+                    "already_recorded"
+                } else if dry_run {
+                    "would_record"
+                } else {
+                    "recorded"
+                }
+                .to_owned(),
+                transport: "none",
+            });
+        }
+        if dry_run {
+            transaction.rollback().await.map_err(StorageError::Query)?;
+        } else {
+            transaction.commit().await.map_err(StorageError::Query)?;
+        }
+        Ok(output)
+    }
+}
+
+fn due_trigger_at(due: &TodoDue, minutes_before: u32) -> Result<DateTime<Utc>, StorageError> {
+    let due_at = match due {
+        TodoDue::Timed { at, .. } => at.with_timezone(&Utc),
+        TodoDue::Date { date, timezone } => {
+            let zone = timezone.parse::<Tz>().map_err(|_| {
+                StorageError::InvalidStoredData(format!("invalid todo timezone: {timezone}"))
+            })?;
+            let local = date.and_time(NaiveTime::from_hms_opt(9, 0, 0).expect("valid time"));
+            match zone.from_local_datetime(&local) {
+                LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => {
+                    value.with_timezone(&Utc)
+                }
+                LocalResult::None => {
+                    return Err(StorageError::InvalidStoredData(
+                        "todo date falls in a nonexistent local time".to_owned(),
+                    ));
+                }
+            }
+        }
+    };
+    Ok(due_at - chrono::Duration::minutes(i64::from(minutes_before)))
 }
 
 async fn todo_edit_conflict(
@@ -1611,6 +1744,13 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
     ) -> crate::application::RepositoryFuture<'_, Vec<crate::application::Reminder>, Self::Error>
     {
         Box::pin(async move { Self::due_reminders(self, at).await })
+    }
+    fn scan_reminders(
+        &self,
+        at: DateTime<Utc>,
+        dry_run: bool,
+    ) -> crate::application::RepositoryFuture<'_, Vec<ReminderDelivery>, Self::Error> {
+        Box::pin(async move { Self::scan_reminders(self, at, dry_run).await })
     }
 }
 
