@@ -2,7 +2,7 @@ use mg_calr::storage::{FOUNDATION_MIGRATION, MIGRATIONS};
 
 #[test]
 fn foundation_migration_is_embedded_and_covers_only_foundation_entities() {
-    assert_eq!(MIGRATIONS.len(), 1);
+    assert_eq!(MIGRATIONS.len(), 2);
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[0].sql, FOUNDATION_MIGRATION);
 

@@ -12,6 +12,7 @@ use crate::domain::{
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
+pub const TODO_CORE_MIGRATION: &str = include_str!("../migrations/0002_todo_core.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -20,11 +21,18 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "foundation",
-    sql: FOUNDATION_MIGRATION,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "foundation",
+        sql: FOUNDATION_MIGRATION,
+    },
+    Migration {
+        version: 2,
+        name: "todo_core",
+        sql: TODO_CORE_MIGRATION,
+    },
+];
 
 #[derive(Debug, Error)]
 pub enum StorageError {

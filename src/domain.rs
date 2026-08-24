@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod todo;
+pub use todo::TodoId;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DomainError {
     #[error("invalid {kind} identifier '{value}': {reason}")]
@@ -104,7 +107,6 @@ macro_rules! domain_id {
 
 domain_id!(CalendarId, "calendar");
 domain_id!(EventId, "event");
-domain_id!(TodoId, "todo");
 domain_id!(ReminderId, "reminder");
 domain_id!(DeliveryId, "reminder delivery");
 domain_id!(AuditId, "audit record");
