@@ -11,6 +11,7 @@ mg-calr init
 mg-calr doctor
 mg-calr database status
 mg-calr database migrate
+mg-calr tui  # line-oriented keyboard shell: j/k, r, q
 ```
 
 Add `--json` for the versioned JSON envelope. `--no-color` and `NO_COLOR` are accepted globally; current foundation human output intentionally emits no ANSI styling. `--database-url URL` overrides `DATABASE_URL`, then TOML configuration. Commands other than `init`, `doctor`, and `database ...` do not connect to PostgreSQL or make network requests.
@@ -51,6 +52,6 @@ Use a disposable database whose URL contains `mg_calr_test`; the test applies sc
 
 ## Not implemented yet
 
-Event/todo CRUD, agenda views, recurrence behavior, reminders scanning/notifications, audit-backed undo, iCalendar, sync, backup/restore, TUI, Quickshell, packaging, and remote integrations are deferred. Schema tables are a migration foundation, not claims that those workflows exist.
+Event/todo CRUD, recurrence behavior, reminders scanning/notifications, audit-backed undo, iCalendar, sync, backup/restore, raw-mode TUI, Quickshell, packaging, and remote integrations are deferred. Schema tables are a migration foundation, not claims that those workflows exist.
 
 No `LICENSE` is included because MIT versus Apache-2.0 remains unresolved.

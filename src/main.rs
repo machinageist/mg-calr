@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -18,6 +18,7 @@ use mg_calr::storage::{
     self, MigrationState, PostgresCalendarEventRepository, PostgresProjectRepository,
     PostgresTodoRepository, StorageError,
 };
+use mg_calr::tui::TuiState;
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
 use serde::Serialize;
 
@@ -56,6 +57,8 @@ enum Command {
     /// Create and list projects.
     Project(ProjectArgs),
     Tag(TagArgs),
+    /// Open the bounded keyboard-first todo shell.
+    Tui,
 }
 
 #[derive(Debug, Args)]
@@ -747,6 +750,35 @@ async fn run_todo_command(
     }
 }
 
+async fn run_tui(database: config::ConnectionSettings) -> Result<(), AppError> {
+    let load = || async {
+        TodoUseCases::new(PostgresTodoRepository::new(database.clone()))
+            .list_todos_async()
+            .await
+            .map_err(query_error)
+    };
+    let mut todos = load().await?;
+    let mut state = TuiState::new();
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    println!("{}", state.render(&todos));
+    let mut line = String::new();
+    while input.read_line(&mut line)? != 0 {
+        state.apply(mg_calr::tui::Key::parse(&line), todos.len());
+        line.clear();
+        if state.take_refresh_request() {
+            todos = load().await?;
+            state.complete_refresh(todos.len());
+        }
+        if state.should_quit() {
+            break;
+        }
+        print!("{}", state.render(&todos));
+        io::stdout().flush()?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
@@ -851,6 +883,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 ),
             }
         }
+        Command::Tui => run_tui(app_config.database).await,
     }
 }
 
