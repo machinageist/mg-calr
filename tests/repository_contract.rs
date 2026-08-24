@@ -70,3 +70,18 @@ fn todo_complete_contract_is_parameterized_and_version_guarded() {
     assert!(source.contains("TodoVersionConflict"));
     assert!(source.contains("TodoNotFound"));
 }
+
+#[test]
+fn todo_trash_and_restore_contracts_are_atomic_and_legacy_safe() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("UPDATE todos SET trashed_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("UPDATE todos SET trashed_at = NULL, deleted_at = NULL"));
+    assert!(source.contains("version = version + 1"));
+    assert!(source.contains("updated_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("trashed_at IS NULL AND deleted_at IS NULL AND version = $2"));
+    assert!(source.contains("(trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2"));
+    assert!(source.contains("SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1"));
+    assert!(source.contains("COALESCE(trashed_at, deleted_at) AS trashed_at"));
+    assert!(!source.contains("SET deleted_at = CURRENT_TIMESTAMP"));
+}

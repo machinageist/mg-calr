@@ -554,6 +554,103 @@ impl PostgresTodoRepository {
         transaction.commit().await.map_err(StorageError::Query)?;
         Ok(todo)
     }
+
+    /// Trash a live todo only when its caller-supplied version is current.
+    /// Completed todos are allowed; `deleted_at` remains untouched for legacy
+    /// compatibility. Repeating trash is an optimistic conflict.
+    ///
+    /// # Errors
+    /// Returns a database error, not-found error, or optimistic version conflict.
+    pub async fn trash_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> Result<Todo, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let row = transaction
+            .query_opt(
+                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                &[&id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = row else {
+            return todo_lifecycle_conflict(&transaction, id, expected_version, false).await;
+        };
+        let todo = todo_from_row(&row)?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(todo)
+    }
+
+    /// Restore a trashed todo only when its caller-supplied version is current.
+    /// Legacy `deleted_at` tombstones are cleared as part of restoration.
+    ///
+    /// # Errors
+    /// Returns a database error, not-found error, or optimistic version conflict.
+    pub async fn restore_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> Result<Todo, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let row = transaction
+            .query_opt(
+                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                &[&id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = row else {
+            return todo_lifecycle_conflict(&transaction, id, expected_version, true).await;
+        };
+        let todo = todo_from_row(&row)?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(todo)
+    }
+}
+
+async fn todo_lifecycle_conflict(
+    transaction: &tokio_postgres::Transaction<'_>,
+    id: TodoId,
+    expected_version: i64,
+    restoring: bool,
+) -> Result<Todo, StorageError> {
+    let state = transaction
+        .query_opt(
+            "SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1",
+            &[&id.as_uuid()],
+        )
+        .await
+        .map_err(StorageError::Query)?;
+    match state {
+        None => Err(StorageError::TodoNotFound { todo_id: id }),
+        Some(row)
+            if !restoring
+                && row
+                    .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                    .is_some() =>
+        {
+            Err(StorageError::TodoNotFound { todo_id: id })
+        }
+        Some(row)
+            if restoring
+                && row
+                    .get::<_, Option<chrono::DateTime<chrono::Utc>>>(1)
+                    .is_none()
+                && row
+                    .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                    .is_none() =>
+        {
+            Err(StorageError::TodoNotFound { todo_id: id })
+        }
+        Some(row) => Err(StorageError::TodoVersionConflict {
+            todo_id: id,
+            expected_version,
+            actual_version: row.get(0),
+        }),
+    }
 }
 
 impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
@@ -579,6 +676,20 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
         expected_version: i64,
     ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
         Box::pin(async move { Self::complete_todo(self, id, expected_version).await })
+    }
+    fn trash_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
+        Box::pin(async move { Self::trash_todo(self, id, expected_version).await })
+    }
+    fn restore_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
+        Box::pin(async move { Self::restore_todo(self, id, expected_version).await })
     }
 }
 
