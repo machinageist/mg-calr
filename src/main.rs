@@ -10,6 +10,7 @@ use mg_calr::application::{
     QueryError, TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
+use mg_calr::domain::todo::ProjectId;
 use mg_calr::domain::todo::{Priority, TodoDue, TodoId};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
 use mg_calr::storage::{
@@ -191,6 +192,10 @@ struct TodoEditArgs {
     notes: Option<String>,
     #[arg(long, conflicts_with = "notes")]
     clear_notes: bool,
+    #[arg(long, conflicts_with = "clear_project")]
+    project_id: Option<ProjectId>,
+    #[arg(long, conflicts_with = "project_id")]
+    clear_project: bool,
 }
 
 #[derive(Debug, Args)]
@@ -427,11 +432,17 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
     } else {
         args.notes.clone().map(Some)
     };
+    let project_id = if args.clear_project {
+        Some(None)
+    } else {
+        args.project_id.map(Some)
+    };
     let edit = TodoEdit {
         title: args.title.clone(),
         priority: args.priority,
         due,
         notes,
+        project_id,
     };
     if edit.is_empty() {
         return Err(AppError::InvalidInput(

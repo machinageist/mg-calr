@@ -78,6 +78,11 @@ fn todo_edit_contract_is_atomic_parameterized_and_preserves_unspecified_fields()
     assert!(source.contains("UPDATE todos SET title = COALESCE($3, title)"));
     assert!(source.contains("due_date = CASE WHEN $5 THEN $6 ELSE due_date END"));
     assert!(source.contains("notes = CASE WHEN $9 THEN $10 ELSE notes END"));
+    assert!(source.contains("project_id = CASE WHEN $11 THEN $12 ELSE project_id END"));
+    assert!(
+        source.contains("SELECT id FROM projects WHERE id = $1 AND archived_at IS NULL FOR UPDATE")
+    );
+    assert!(source.contains("ProjectNotFound"));
     assert!(source.contains("version = version + 1, updated_at = CURRENT_TIMESTAMP"));
     assert!(source.contains("AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2"));
     assert!(source.contains("todo_edit_conflict"));

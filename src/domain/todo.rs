@@ -46,6 +46,10 @@ macro_rules! todo_id {
             pub const fn as_uuid(self) -> Uuid {
                 self.0
             }
+            #[must_use]
+            pub const fn from_uuid(value: Uuid) -> Self {
+                Self(value)
+            }
         }
         impl Default for $name {
             fn default() -> Self {

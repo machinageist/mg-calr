@@ -50,6 +50,8 @@ pub enum StorageError {
     CalendarNotLive { calendar_id: CalendarId },
     #[error("todo {todo_id} does not exist or is trashed")]
     TodoNotFound { todo_id: TodoId },
+    #[error("project {project_id} does not exist or is archived")]
+    ProjectNotFound { project_id: ProjectId },
     #[error(
         "todo {todo_id} version conflict: expected {expected_version}, actual {actual_version}"
     )]
@@ -687,10 +689,27 @@ impl PostgresTodoRepository {
         let title = edit.title;
         let notes_changed = edit.notes.is_some();
         let notes = edit.notes.flatten();
+        let project_changed = edit.project_id.is_some();
+        let project_id = edit.project_id.flatten().map(ProjectId::as_uuid);
+        if let Some(project_id) = project_id {
+            let project_is_live = transaction
+                .query_opt(
+                    "SELECT id FROM projects WHERE id = $1 AND archived_at IS NULL FOR UPDATE",
+                    &[&project_id],
+                )
+                .await
+                .map_err(StorageError::Query)?
+                .is_some();
+            if !project_is_live {
+                return Err(StorageError::ProjectNotFound {
+                    project_id: ProjectId::from_uuid(project_id),
+                });
+            }
+        }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
-                &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes],
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id],
             )
             .await
             .map_err(StorageError::Query)?;

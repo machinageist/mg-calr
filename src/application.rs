@@ -128,6 +128,8 @@ pub struct TodoEdit {
     pub priority: Option<Priority>,
     pub due: Option<TodoDue>,
     pub notes: Option<Option<String>>,
+    /// `None` preserves the existing project; `Some(None)` clears it.
+    pub project_id: Option<Option<ProjectId>>,
 }
 
 impl TodoEdit {
@@ -137,6 +139,7 @@ impl TodoEdit {
             && self.priority.is_none()
             && self.due.is_none()
             && self.notes.is_none()
+            && self.project_id.is_none()
     }
 }
 

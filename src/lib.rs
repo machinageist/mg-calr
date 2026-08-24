@@ -44,6 +44,7 @@ impl AppError {
             Self::Storage(storage::StorageError::CalendarNotLive { .. }) => "calendar_not_live",
             Self::Storage(storage::StorageError::TodoNotFound { .. })
             | Self::TodoNotFound { .. } => "todo_not_found",
+            Self::Storage(storage::StorageError::ProjectNotFound { .. }) => "project_not_found",
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => {
                 "todo_version_conflict"
             }
@@ -65,7 +66,10 @@ impl AppError {
             Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
-            | Self::Storage(storage::StorageError::TodoNotFound { .. }) => 66,
+            | Self::Storage(
+                storage::StorageError::TodoNotFound { .. }
+                | storage::StorageError::ProjectNotFound { .. },
+            ) => 66,
             Self::Config(_) => 78,
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => 75,
             Self::Storage(_) => 69,
