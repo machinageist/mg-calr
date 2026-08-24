@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
+    todo::{Priority, ProjectId, Todo, TodoDue, TodoId},
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
@@ -245,6 +246,12 @@ const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0
     COALESCE(e.all_day_start, (e.starts_at AT TIME ZONE 'UTC')::date), \
     e.starts_at NULLS FIRST, lower(e.title), e.id";
 
+const TODO_SELECT: &str = "SELECT t.id, t.parent_id, t.title, t.notes, t.due_date, t.due_at, \
+    t.timezone, t.priority, t.project_id, t.completed_at, COALESCE(t.trashed_at, t.deleted_at) AS trashed_at, t.version, \
+    t.created_at, t.updated_at FROM todos t";
+const TODO_ORDER: &str = "ORDER BY CASE WHEN t.due_date IS NULL AND t.due_at IS NULL THEN 1 ELSE 0 END, \
+    t.due_date NULLS LAST, t.due_at NULLS LAST, lower(t.title), t.id";
+
 /// PostgreSQL-backed repository for calendar and event commands.
 #[derive(Debug, Clone)]
 pub struct PostgresCalendarEventRepository {
@@ -429,6 +436,91 @@ impl PostgresCalendarEventRepository {
     }
 }
 
+/// PostgreSQL-backed repository for todo persistence. Tag writes are deferred
+/// from this bounded slice; the core row is authoritative in PostgreSQL.
+#[derive(Debug, Clone)]
+pub struct PostgresTodoRepository {
+    settings: ConnectionSettings,
+}
+
+impl PostgresTodoRepository {
+    #[must_use]
+    pub const fn new(settings: ConnectionSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Insert a todo row in a transaction. Tags are intentionally not written.
+    ///
+    /// # Errors
+    /// Returns connection or PostgreSQL errors.
+    pub async fn save_todo(&self, todo: &Todo) -> Result<(), StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let (due_date, due_at, timezone) = match &todo.due {
+            Some(TodoDue::Date { date, timezone }) => (Some(*date), None, Some(timezone.as_str())),
+            Some(TodoDue::Timed { at, timezone }) => {
+                (None, Some(at.with_timezone(&Utc)), Some(timezone.as_str()))
+            }
+            None => (None, None, None),
+        };
+        transaction.execute(
+            "INSERT INTO todos (id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, trashed_at, version, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            &[&todo.id.as_uuid(), &todo.parent_id.map(TodoId::as_uuid), &todo.title,
+              &todo.notes, &due_date, &due_at, &timezone, &todo.priority.to_string(),
+              &todo.project_id.map(ProjectId::as_uuid), &todo.completed_at, &todo.trashed_at,
+              &todo.version, &todo.created_at, &todo.updated_at],
+        ).await.map_err(StorageError::Query)?;
+        transaction.commit().await.map_err(StorageError::Query)
+    }
+
+    /// Find a todo, including completed and trashed rows.
+    ///
+    /// # Errors
+    /// Returns connection, query, or invalid stored-data errors.
+    pub async fn find_todo(&self, id: TodoId) -> Result<Option<Todo>, StorageError> {
+        let (client, _connection_task) = connect(&self.settings).await?;
+        client
+            .query_opt(&format!("{TODO_SELECT} WHERE t.id = $1"), &[&id.as_uuid()])
+            .await
+            .map_err(StorageError::Query)?
+            .as_ref()
+            .map(todo_from_row)
+            .transpose()
+    }
+
+    /// List todos in deterministic due/title/ID order.
+    ///
+    /// # Errors
+    /// Returns connection, query, or invalid stored-data errors.
+    pub async fn list_todos(&self) -> Result<Vec<Todo>, StorageError> {
+        let (client, _connection_task) = connect(&self.settings).await?;
+        let rows = client
+            .query(&format!("{TODO_SELECT} {TODO_ORDER}"), &[])
+            .await
+            .map_err(StorageError::Query)?;
+        rows.iter().map(todo_from_row).collect()
+    }
+}
+
+impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
+    type Error = StorageError;
+    fn save_todo<'a>(
+        &'a self,
+        todo: &'a Todo,
+    ) -> crate::application::RepositoryFuture<'a, (), Self::Error> {
+        Box::pin(async move { Self::save_todo(self, todo).await })
+    }
+    fn find_todo(
+        &self,
+        id: TodoId,
+    ) -> crate::application::RepositoryFuture<'_, Option<Todo>, Self::Error> {
+        Box::pin(async move { Self::find_todo(self, id).await })
+    }
+    fn list_todos(&self) -> crate::application::RepositoryFuture<'_, Vec<Todo>, Self::Error> {
+        Box::pin(async move { Self::list_todos(self).await })
+    }
+}
+
 impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventRepository {
     type Error = StorageError;
 
@@ -508,6 +600,71 @@ struct ExtensionProperties {
     organizer: Option<String>,
     #[serde(default)]
     attendees: Vec<String>,
+}
+
+fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
+    let parse_id = |value: Uuid, kind: &'static str| {
+        value.to_string().parse().map_err(|error| {
+            StorageError::InvalidStoredData(format!("invalid {kind} identifier: {error}"))
+        })
+    };
+    let id = parse_id(row.get(0), "todo")?;
+    let parent_id = row
+        .get::<_, Option<Uuid>>(1)
+        .map(|value| parse_id(value, "todo"))
+        .transpose()?;
+    let project_id = row
+        .get::<_, Option<Uuid>>(8)
+        .map(|value| {
+            value.to_string().parse::<ProjectId>().map_err(|error| {
+                StorageError::InvalidStoredData(format!("invalid project identifier: {error}"))
+            })
+        })
+        .transpose()?;
+    let timezone = row.get::<_, Option<String>>(6);
+    let due_date = row.get::<_, Option<NaiveDate>>(4);
+    let due_at = row.get::<_, Option<DateTime<Utc>>>(5);
+    let due = match (due_date, due_at, timezone) {
+        (None, None, None) => None,
+        (Some(date), None, Some(zone)) => Some(TodoDue::date(date, zone)),
+        (None, Some(at), Some(zone)) => {
+            let parsed_zone = zone.parse::<Tz>().map_err(|_| {
+                StorageError::InvalidStoredData(format!("invalid IANA timezone '{zone}'"))
+            })?;
+            Some(TodoDue::timed(
+                at.with_timezone(&parsed_zone).fixed_offset(),
+                zone,
+            ))
+        }
+        _ => {
+            return Err(StorageError::InvalidStoredData(
+                "todo has mixed or incomplete due columns".to_owned(),
+            ));
+        }
+    }
+    .transpose()
+    .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+    let priority = row
+        .get::<_, String>(7)
+        .parse::<Priority>()
+        .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+    Todo {
+        id,
+        title: row.get(2),
+        due,
+        priority,
+        project_id,
+        tag_ids: Vec::new(),
+        notes: row.get(3),
+        parent_id,
+        completed_at: row.get(9),
+        trashed_at: row.get(10),
+        version: row.get(11),
+        created_at: row.get(12),
+        updated_at: row.get(13),
+    }
+    .rehydrate()
+    .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
 }
 
 fn calendar_from_row(row: &Row) -> Result<Calendar, StorageError> {
@@ -593,8 +750,10 @@ mod tests {
 
     use tokio_postgres::config::Host;
 
-    use super::postgres_config;
+    use super::{TODO_ORDER, TODO_SELECT, postgres_config};
+    use crate::application::TodoQueryProjection;
     use crate::config::{ConfigSource, ConnectionSettings};
+    use crate::domain::todo::Todo;
 
     #[test]
     fn libpq_local_uri_uses_the_postgresql_socket() {
@@ -610,5 +769,22 @@ mod tests {
             config.get_hosts(),
             &[Host::Unix(Path::new("/run/postgresql").to_path_buf())]
         );
+    }
+
+    #[test]
+    fn todo_sql_contract_is_parameterized_and_stably_ordered() {
+        assert!(!TODO_SELECT.contains("{title}"));
+        assert!(TODO_SELECT.contains("COALESCE(t.trashed_at, t.deleted_at)"));
+        assert!(TODO_ORDER.contains("lower(t.title)"));
+        assert!(TODO_ORDER.contains("t.id"));
+    }
+
+    #[test]
+    fn todo_query_projection_serializes_core_fields_without_tags() {
+        let todo = Todo::new("Stable output").expect("valid todo");
+        let value = serde_json::to_value(TodoQueryProjection::from(todo)).expect("serializable");
+        assert_eq!(value["title"], "Stable output");
+        assert!(value.get("tag_ids").is_none());
+        assert!(value.get("version").is_some());
     }
 }

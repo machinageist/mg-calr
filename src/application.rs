@@ -8,7 +8,10 @@ use chrono_tz::Tz;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::domain::{Calendar, CalendarId, DomainError, Event, EventId, EventTime};
+use crate::domain::{
+    Calendar, CalendarId, DomainError, Event, EventId, EventTime,
+    todo::{Todo, TodoDue, TodoId},
+};
 
 /// Boxed asynchronous repository operation used at the transport boundary.
 pub type RepositoryFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
@@ -57,6 +60,21 @@ pub trait AsyncCalendarEventRepository {
         starts_at: DateTime<FixedOffset>,
         ends_at: DateTime<FixedOffset>,
     ) -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+}
+
+/// Asynchronous persistence boundary for the local-only todo store.
+pub trait AsyncTodoRepository {
+    type Error;
+
+    /// # Errors
+    /// Returns the repository's typed persistence error.
+    fn save_todo<'a>(&'a self, todo: &'a Todo) -> RepositoryFuture<'a, (), Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn find_todo(&self, id: TodoId) -> RepositoryFuture<'_, Option<Todo>, Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn list_todos(&self) -> RepositoryFuture<'_, Vec<Todo>, Self::Error>;
 }
 
 #[derive(Debug, Error)]
@@ -149,6 +167,43 @@ impl fmt::Display for EventProjection {
                 "{}\t{}\t{}..{}\tall-day",
                 self.id, self.title, start, end_exclusive
             ),
+        }
+    }
+}
+
+/// Stable query projection for todo output. Tags and dependency state are
+/// intentionally absent until their persistence boundaries are implemented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TodoQueryProjection {
+    pub id: TodoId,
+    pub title: String,
+    pub due: Option<TodoDue>,
+    pub priority: crate::domain::todo::Priority,
+    pub project_id: Option<crate::domain::todo::ProjectId>,
+    pub notes: Option<String>,
+    pub parent_id: Option<TodoId>,
+    pub completed_at: Option<DateTime<chrono::Utc>>,
+    pub trashed_at: Option<DateTime<chrono::Utc>>,
+    pub version: i64,
+    pub created_at: DateTime<chrono::Utc>,
+    pub updated_at: DateTime<chrono::Utc>,
+}
+
+impl From<Todo> for TodoQueryProjection {
+    fn from(todo: Todo) -> Self {
+        Self {
+            id: todo.id,
+            title: todo.title,
+            due: todo.due,
+            priority: todo.priority,
+            project_id: todo.project_id,
+            notes: todo.notes,
+            parent_id: todo.parent_id,
+            completed_at: todo.completed_at,
+            trashed_at: todo.trashed_at,
+            version: todo.version,
+            created_at: todo.created_at,
+            updated_at: todo.updated_at,
         }
     }
 }

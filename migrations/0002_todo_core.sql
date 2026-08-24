@@ -28,11 +28,6 @@ ALTER TABLE todos ADD COLUMN IF NOT EXISTS due_date date;
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1;
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS trashed_at timestamptz;
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE todos ADD CONSTRAINT todos_due_representation_check
-    CHECK (NOT (due_date IS NOT NULL AND due_at IS NOT NULL));
-ALTER TABLE todos ADD CONSTRAINT todos_due_timezone_check
-    CHECK ((due_at IS NULL AND timezone IS NULL) OR (due_at IS NOT NULL AND timezone IS NOT NULL));
-ALTER TABLE todos ADD CONSTRAINT todos_version_positive_check CHECK (version > 0);
 
 CREATE TABLE IF NOT EXISTS todo_tags (
     todo_id uuid NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
