@@ -1,4 +1,5 @@
 #![allow(clippy::missing_errors_doc)]
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -44,6 +45,12 @@ pub enum TodoError {
     InvalidRecurrenceRange,
     #[error("stored recurrence rule is invalid: {reason}")]
     InvalidStoredRecurrence { reason: String },
+    #[error("reminder offset must be between 1 and 10080 minutes")]
+    InvalidReminderOffset,
+    #[error("reminders require a due value")]
+    ReminderWithoutDue,
+    #[error("stored reminder data is invalid: {reason}")]
+    InvalidStoredReminder { reason: String },
 }
 
 macro_rules! todo_id {
@@ -326,6 +333,7 @@ pub struct Todo {
     pub title: String,
     pub due: Option<TodoDue>,
     pub recurrence: Option<RecurrenceRule>,
+    pub reminders: Vec<TodoReminder>,
     pub priority: Priority,
     pub project_id: Option<ProjectId>,
     pub tag_ids: Vec<TagId>,
@@ -352,6 +360,7 @@ impl Todo {
             title,
             due: None,
             recurrence: None,
+            reminders: Vec::new(),
             priority: Priority::None,
             project_id: None,
             tag_ids: Vec::new(),
@@ -375,6 +384,7 @@ impl Todo {
             rule.validate()?;
             validate_recurrence_due(self.due.as_ref(), rule)?;
         }
+        validate_reminders(self.due.as_ref(), &self.reminders)?;
         if self.version < 1 {
             self.version = 1;
         }
@@ -496,6 +506,40 @@ fn valid_text(field: &'static str, value: String) -> Result<String, TodoError> {
         return Err(TodoError::ControlCharacter { field });
     }
     Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoReminder {
+    pub minutes_before: u32,
+    pub repeatable: bool,
+}
+
+impl TodoReminder {
+    pub fn new(minutes_before: u32, repeatable: bool) -> Result<Self, TodoError> {
+        if !(1..=10_080).contains(&minutes_before) {
+            return Err(TodoError::InvalidReminderOffset);
+        }
+        Ok(Self {
+            minutes_before,
+            repeatable,
+        })
+    }
+}
+
+fn validate_reminders(due: Option<&TodoDue>, reminders: &[TodoReminder]) -> Result<(), TodoError> {
+    if !reminders.is_empty() && due.is_none() {
+        return Err(TodoError::ReminderWithoutDue);
+    }
+    let mut seen = HashSet::new();
+    for reminder in reminders {
+        TodoReminder::new(reminder.minutes_before, reminder.repeatable)?;
+        if !seen.insert((reminder.minutes_before, reminder.repeatable)) {
+            return Err(TodoError::InvalidStoredReminder {
+                reason: "duplicate reminder".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

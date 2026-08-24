@@ -63,6 +63,7 @@ impl AppError {
             }
             Self::Storage(storage::StorageError::InvalidStoredData(_)) => "stored_data_invalid",
             Self::Storage(storage::StorageError::InvalidRecurrence { .. }) => "recurrence_invalid",
+            Self::Storage(storage::StorageError::InvalidReminder { .. }) => "reminder_invalid",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
             Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => "invalid_input",
             Self::RequiredInput { .. } => "required_input_missing",
@@ -86,7 +87,8 @@ impl AppError {
             | Self::Storage(storage::StorageError::Cycle { .. })
             | Self::Storage(storage::StorageError::SelfDependency { .. })
             | Self::Storage(storage::StorageError::DependencyCycle { .. })
-            | Self::Storage(storage::StorageError::InvalidRecurrence { .. }) => 65,
+            | Self::Storage(storage::StorageError::InvalidRecurrence { .. })
+            | Self::Storage(storage::StorageError::InvalidReminder { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
             | Self::Storage(storage::StorageError::TodoNotTrashed { .. })

@@ -501,6 +501,7 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
         parent_id,
         tag_ids,
         dependency_ids,
+        reminders: None,
     };
     if edit.is_empty() {
         return Err(AppError::InvalidInput(

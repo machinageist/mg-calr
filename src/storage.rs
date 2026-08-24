@@ -15,12 +15,14 @@ use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
     todo::{
         Priority, Project, ProjectId, RecurrenceRule, Tag, TagId, Todo, TodoDue, TodoError, TodoId,
+        TodoReminder,
     },
 };
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
 pub const TODO_CORE_MIGRATION: &str = include_str!("../migrations/0002_todo_core.sql");
 pub const TODO_RECURRENCE_MIGRATION: &str = include_str!("../migrations/0003_todo_recurrence.sql");
+pub const TODO_REMINDERS_MIGRATION: &str = include_str!("../migrations/0004_todo_reminders.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -44,6 +46,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "todo_recurrence",
         sql: TODO_RECURRENCE_MIGRATION,
+    },
+    Migration {
+        version: 4,
+        name: "todo_reminders",
+        sql: TODO_REMINDERS_MIGRATION,
     },
 ];
 
@@ -93,6 +100,8 @@ pub enum StorageError {
     },
     #[error("invalid recurrence rule: {reason}")]
     InvalidRecurrence { reason: String },
+    #[error("invalid reminder: {reason}")]
+    InvalidReminder { reason: String },
     #[error("stored calendar/event data is invalid: {0}")]
     InvalidStoredData(String),
     #[error("migration version {version} is recorded as '{actual}', expected '{expected}'")]
@@ -294,8 +303,8 @@ const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0
 
 const TODO_SELECT: &str = "SELECT t.id, t.parent_id, t.title, t.notes, t.due_date, t.due_at, \
     t.timezone, t.priority, t.project_id, t.completed_at, COALESCE(t.trashed_at, t.deleted_at) AS trashed_at, t.version, \
-    t.created_at, t.updated_at, t.recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids, \
-    COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = t.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[]) AS dependency_ids FROM todos t";
+    t.created_at, t.updated_at, t.recurrence_rule, COALESCE((SELECT jsonb_agg(jsonb_build_object('minutes_before', tr.minutes_before, 'repeatable', tr.repeatable) ORDER BY tr.minutes_before, tr.repeatable) FROM todo_reminders tr WHERE tr.todo_id = t.id), '[]'::jsonb), COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids, \
+    COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = t.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[]) FROM todos t";
 const TODO_ORDER: &str = "ORDER BY CASE WHEN t.due_date IS NULL AND t.due_at IS NULL THEN 1 ELSE 0 END, \
     t.due_date NULLS LAST, t.due_at NULLS LAST, lower(t.title), t.id";
 
@@ -672,6 +681,15 @@ impl PostgresTodoRepository {
                 .await
                 .map_err(StorageError::Query)?;
         }
+        for reminder in &todo.reminders {
+            transaction
+                .execute(
+                    "INSERT INTO todo_reminders (todo_id, minutes_before, repeatable) VALUES ($1, $2, $3)",
+                    &[&todo.id.as_uuid(), &i32::try_from(reminder.minutes_before).map_err(|_| StorageError::InvalidReminder { reason: "offset overflow".to_owned() })?, &reminder.repeatable],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+        }
         transaction.commit().await.map_err(StorageError::Query)
     }
 
@@ -720,7 +738,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE((SELECT jsonb_agg(jsonb_build_object('minutes_before', tr.minutes_before, 'repeatable', tr.repeatable) ORDER BY tr.minutes_before, tr.repeatable) FROM todo_reminders tr WHERE tr.todo_id = todos.id), '[]'::jsonb), COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -762,7 +780,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE((SELECT jsonb_agg(jsonb_build_object('minutes_before', tr.minutes_before, 'repeatable', tr.repeatable) ORDER BY tr.minutes_before, tr.repeatable) FROM todo_reminders tr WHERE tr.todo_id = todos.id), '[]'::jsonb), COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -789,7 +807,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE((SELECT jsonb_agg(jsonb_build_object('minutes_before', tr.minutes_before, 'repeatable', tr.repeatable) ORDER BY tr.minutes_before, tr.repeatable) FROM todo_reminders tr WHERE tr.todo_id = todos.id), '[]'::jsonb), COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -885,6 +903,15 @@ impl PostgresTodoRepository {
     ) -> Result<Todo, StorageError> {
         if let Some(Some(rule)) = &edit.recurrence {
             rule.validate().map_err(|error| recurrence_error(&error))?;
+        }
+        if let Some(reminders) = &edit.reminders {
+            for reminder in reminders {
+                TodoReminder::new(reminder.minutes_before, reminder.repeatable).map_err(
+                    |error| StorageError::InvalidReminder {
+                        reason: error.to_string(),
+                    },
+                )?;
+            }
         }
         let (mut client, _connection_task) = connect(&self.settings).await?;
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
@@ -1060,9 +1087,26 @@ impl PostgresTodoRepository {
                 return Err(StorageError::DependencyCycle { todo_id: id });
             }
         }
+        if due_changed
+            && due_date.is_none()
+            && due_at.is_none()
+            && edit.reminders.is_none()
+            && transaction
+                .query_opt(
+                    "SELECT 1 FROM todo_reminders WHERE todo_id = $1 LIMIT 1",
+                    &[&id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?
+                .is_some()
+        {
+            return Err(StorageError::InvalidReminder {
+                reason: "reminders require a due value".to_owned(),
+            });
+        }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, recurrence_rule, COALESCE((SELECT jsonb_agg(jsonb_build_object('minutes_before', tr.minutes_before, 'repeatable', tr.repeatable) ORDER BY tr.minutes_before, tr.repeatable) FROM todo_reminders tr WHERE tr.todo_id = todos.id), '[]'::jsonb), COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id, &parent_changed, &parent_id],
             )
             .await
@@ -1134,8 +1178,62 @@ impl PostgresTodoRepository {
                 .map(|row| TodoId::from_uuid(row.get(0)))
                 .collect();
         }
+        if let Some(reminders) = edit.reminders {
+            todo.reminders = reminders;
+            todo.clone()
+                .rehydrate()
+                .map_err(|error| StorageError::InvalidReminder {
+                    reason: error.to_string(),
+                })?;
+            transaction
+                .execute(
+                    "DELETE FROM todo_reminders WHERE todo_id = $1",
+                    &[&id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+            for reminder in &todo.reminders {
+                transaction
+                    .execute(
+                        "INSERT INTO todo_reminders (todo_id, minutes_before, repeatable) VALUES ($1, $2, $3)",
+                        &[&id.as_uuid(), &i32::try_from(reminder.minutes_before).map_err(|_| StorageError::InvalidReminder { reason: "offset overflow".to_owned() })?, &reminder.repeatable],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?;
+            }
+        }
         transaction.commit().await.map_err(StorageError::Query)?;
         Ok(todo)
+    }
+
+    /// Query live, incomplete reminders due by an instant in stable order.
+    pub async fn due_reminders(
+        &self,
+        at: DateTime<Utc>,
+    ) -> Result<Vec<crate::application::Reminder>, StorageError> {
+        let (client, _connection_task) = connect(&self.settings).await?;
+        let rows = client
+            .query(
+                "SELECT t.id, t.title, COALESCE(t.due_at, (t.due_date::timestamp + time '09:00') AT TIME ZONE t.timezone) - (tr.minutes_before * INTERVAL '1 minute') AS trigger_at, tr.minutes_before, tr.repeatable FROM todos t JOIN todo_reminders tr ON tr.todo_id = t.id WHERE (t.due_date IS NOT NULL OR t.due_at IS NOT NULL) AND t.completed_at IS NULL AND t.trashed_at IS NULL AND t.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM todo_dependencies dep JOIN todos prerequisite ON prerequisite.id = dep.prerequisite_id WHERE dep.dependent_id = t.id AND prerequisite.completed_at IS NULL AND prerequisite.trashed_at IS NULL AND prerequisite.deleted_at IS NULL) AND COALESCE(t.due_at, (t.due_date::timestamp + time '09:00') AT TIME ZONE t.timezone) - (tr.minutes_before * INTERVAL '1 minute') <= $1 ORDER BY trigger_at, lower(t.title), t.id, tr.minutes_before, tr.repeatable",
+                &[&at],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::application::Reminder {
+                    todo_id: TodoId::from_uuid(row.get(0)),
+                    title: row.get(1),
+                    trigger_at: row.get(2),
+                    minutes_before: row.get::<_, i32>(3).try_into().map_err(|_| {
+                        StorageError::InvalidReminder {
+                            reason: "negative stored offset".to_owned(),
+                        }
+                    })?,
+                    repeatable: row.get(4),
+                })
+            })
+            .collect()
     }
 }
 
@@ -1264,6 +1362,13 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
         edit: TodoEdit,
     ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
         Box::pin(async move { Self::edit_todo(self, id, expected_version, edit).await })
+    }
+    fn due_reminders(
+        &self,
+        at: DateTime<Utc>,
+    ) -> crate::application::RepositoryFuture<'_, Vec<crate::application::Reminder>, Self::Error>
+    {
+        Box::pin(async move { Self::due_reminders(self, at).await })
     }
 }
 
@@ -1418,6 +1523,7 @@ fn recurrence_error(error: &TodoError) -> StorageError {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     let parse_id = |value: Uuid, kind: &'static str| {
         value.to_string().parse().map_err(|error| {
@@ -1471,8 +1577,13 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     } else {
         None
     };
-    let tag_index = if row.len() > 16 { 15 } else { 14 };
-    let dependency_index = if row.len() > 16 { 16 } else { 15 };
+    let (tag_index, dependency_index) = if row.len() > 17 {
+        (16, 17)
+    } else if row.len() > 16 {
+        (15, 16)
+    } else {
+        (14, 15)
+    };
     let tag_ids = if row.len() > tag_index {
         row.get::<_, Vec<Uuid>>(tag_index)
             .into_iter()
@@ -1489,6 +1600,13 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     } else {
         Vec::new()
     };
+    let reminders = if row.len() > 17 {
+        serde_json::from_value::<Vec<TodoReminder>>(row.get(15)).map_err(|error| {
+            StorageError::InvalidStoredData(format!("invalid reminders: {error}"))
+        })?
+    } else {
+        Vec::new()
+    };
     let priority = row
         .get::<_, String>(7)
         .parse::<Priority>()
@@ -1498,6 +1616,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
         title: row.get(2),
         due,
         recurrence,
+        reminders,
         priority,
         project_id,
         tag_ids,

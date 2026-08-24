@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::domain::{
     Calendar, CalendarId, DomainError, Event, EventId, EventTime,
-    todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId},
+    todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId, TodoReminder},
 };
 
 /// Boxed asynchronous repository operation used at the transport boundary.
@@ -112,6 +112,11 @@ pub trait AsyncTodoRepository {
         expected_version: i64,
         edit: TodoEdit,
     ) -> RepositoryFuture<'_, Todo, Self::Error>;
+    /// Query reminders whose trigger is at or before the supplied instant.
+    fn due_reminders(
+        &self,
+        at: DateTime<chrono::Utc>,
+    ) -> RepositoryFuture<'_, Vec<Reminder>, Self::Error>;
 }
 
 /// Asynchronous persistence boundary for project metadata.
@@ -150,6 +155,8 @@ pub struct TodoEdit {
     pub tag_ids: Option<Vec<TagId>>,
     /// `None` preserves dependencies; `Some` atomically replaces them.
     pub dependency_ids: Option<Vec<TodoId>>,
+    /// `None` preserves reminders; `Some` atomically replaces them.
+    pub reminders: Option<Vec<TodoReminder>>,
 }
 
 impl TodoEdit {
@@ -164,6 +171,7 @@ impl TodoEdit {
             && self.parent_id.is_none()
             && self.tag_ids.is_none()
             && self.dependency_ids.is_none()
+            && self.reminders.is_none()
     }
 }
 
@@ -305,6 +313,7 @@ pub struct TodoQueryProjection {
     pub title: String,
     pub due: Option<TodoDue>,
     pub recurrence: Option<crate::domain::todo::RecurrenceRule>,
+    pub reminders: Vec<TodoReminder>,
     pub priority: crate::domain::todo::Priority,
     pub project_id: Option<crate::domain::todo::ProjectId>,
     pub tag_ids: Vec<TagId>,
@@ -318,24 +327,53 @@ pub struct TodoQueryProjection {
     pub updated_at: DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reminder {
+    pub todo_id: TodoId,
+    pub title: String,
+    pub trigger_at: DateTime<chrono::Utc>,
+    pub minutes_before: u32,
+    pub repeatable: bool,
+}
+
 impl From<Todo> for TodoQueryProjection {
     fn from(todo: Todo) -> Self {
+        let Todo {
+            id,
+            title,
+            due,
+            recurrence,
+            mut reminders,
+            priority,
+            project_id,
+            tag_ids,
+            dependency_ids,
+            notes,
+            parent_id,
+            completed_at,
+            trashed_at,
+            version,
+            created_at,
+            updated_at,
+        } = todo;
+        reminders.sort_by_key(|reminder| (reminder.minutes_before, reminder.repeatable));
         Self {
-            id: todo.id,
-            title: todo.title,
-            due: todo.due,
-            recurrence: todo.recurrence,
-            priority: todo.priority,
-            project_id: todo.project_id,
-            tag_ids: todo.tag_ids,
-            dependency_ids: todo.dependency_ids,
-            notes: todo.notes,
-            parent_id: todo.parent_id,
-            completed_at: todo.completed_at,
-            trashed_at: todo.trashed_at,
-            version: todo.version,
-            created_at: todo.created_at,
-            updated_at: todo.updated_at,
+            id,
+            title,
+            due,
+            recurrence,
+            reminders,
+            priority,
+            project_id,
+            tag_ids,
+            dependency_ids,
+            notes,
+            parent_id,
+            completed_at,
+            trashed_at,
+            version,
+            created_at,
+            updated_at,
         }
     }
 }
@@ -630,6 +668,15 @@ where
             .await
             .map(TodoQueryProjection::from)
             .map_err(ApplicationError::Repository)
+    }
+    pub async fn due_reminders_async(
+        &self,
+        at: DateTime<chrono::Utc>,
+    ) -> Result<Vec<Reminder>, QueryError<R::Error>> {
+        self.repository
+            .due_reminders(at)
+            .await
+            .map_err(QueryError::Repository)
     }
 }
 

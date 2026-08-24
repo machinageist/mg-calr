@@ -85,7 +85,7 @@ fn todo_validation_and_projection_are_serializable() {
 fn todo_core_migration_is_ordered_and_non_destructive() {
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 2, 3, 4]
     );
     assert_eq!(MIGRATIONS[1].name, "todo_core");
     let sql = MIGRATIONS[1].sql;
@@ -109,6 +109,28 @@ fn todo_core_migration_is_ordered_and_non_destructive() {
     assert!(sql.contains("information_schema.columns"));
     assert!(sql.contains("pg_constraint"));
     assert!(sql.contains("migration refused"));
+}
+
+#[test]
+fn reminders_validate_due_offsets_and_deduplicate() {
+    use mg_calr::domain::todo::TodoReminder;
+
+    assert!(matches!(
+        TodoReminder::new(0, false),
+        Err(TodoError::InvalidReminderOffset)
+    ));
+    let mut todo = Todo::new("Remind me").unwrap();
+    todo.reminders = vec![TodoReminder::new(5, false).unwrap()];
+    assert!(matches!(
+        todo.clone().rehydrate(),
+        Err(TodoError::ReminderWithoutDue)
+    ));
+    todo.due = Some(TodoDue::date(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(), "UTC").unwrap());
+    todo.reminders.push(TodoReminder::new(5, false).unwrap());
+    assert!(matches!(
+        todo.rehydrate(),
+        Err(TodoError::InvalidStoredReminder { .. })
+    ));
 }
 
 #[test]
