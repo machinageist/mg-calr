@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate};
+use mg_calr::application::TodoQueryProjection;
 use mg_calr::domain::todo::{Priority, ProjectId, TagId, Todo, TodoDue, TodoError, TodoId};
 use mg_calr::storage::MIGRATIONS;
 
@@ -108,4 +109,16 @@ fn todo_core_migration_is_ordered_and_non_destructive() {
     assert!(sql.contains("information_schema.columns"));
     assert!(sql.contains("pg_constraint"));
     assert!(sql.contains("migration refused"));
+}
+
+#[test]
+fn completed_projection_preserves_completed_state_and_version() {
+    let mut todo = Todo::new("Done").unwrap();
+    todo.completed_at = Some(chrono::Utc::now());
+    todo.version = 2;
+    let projection = TodoQueryProjection::from(todo);
+    let value = serde_json::to_value(&projection).unwrap();
+    assert!(value["completed_at"].is_string());
+    assert_eq!(value["version"], 2);
+    assert!(projection.to_string().contains("completed"));
 }

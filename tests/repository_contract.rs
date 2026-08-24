@@ -57,3 +57,16 @@ fn repository_preserves_standard_event_fields_in_storage_contract() {
         );
     }
 }
+
+#[test]
+fn todo_complete_contract_is_parameterized_and_version_guarded() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("UPDATE todos SET completed_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("version = version + 1"));
+    assert!(source.contains("WHERE id = $1 AND trashed_at IS NULL"));
+    assert!(source.contains("AND deleted_at IS NULL AND completed_at IS NULL AND version = $2"));
+    assert!(source.contains("RETURNING id, parent_id, title"));
+    assert!(source.contains("TodoVersionConflict"));
+    assert!(source.contains("TodoNotFound"));
+}

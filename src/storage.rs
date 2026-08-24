@@ -47,6 +47,16 @@ pub enum StorageError {
     Query(#[source] tokio_postgres::Error),
     #[error("calendar {calendar_id} does not exist or is deleted")]
     CalendarNotLive { calendar_id: CalendarId },
+    #[error("todo {todo_id} does not exist or is trashed")]
+    TodoNotFound { todo_id: TodoId },
+    #[error(
+        "todo {todo_id} version conflict: expected {expected_version}, actual {actual_version}"
+    )]
+    TodoVersionConflict {
+        todo_id: TodoId,
+        expected_version: i64,
+        actual_version: i64,
+    },
     #[error("stored calendar/event data is invalid: {0}")]
     InvalidStoredData(String),
     #[error("migration version {version} is recorded as '{actual}', expected '{expected}'")]
@@ -500,6 +510,50 @@ impl PostgresTodoRepository {
             .map_err(StorageError::Query)?;
         rows.iter().map(todo_from_row).collect()
     }
+
+    /// Complete a live todo only when its caller-supplied version is current.
+    ///
+    /// The update is atomic and returns the newly completed row. A stale
+    /// version or a trashed/missing row never mutates the todo.
+    ///
+    /// # Errors
+    /// Returns a database error, [`StorageError::TodoNotFound`], or
+    /// [`StorageError::TodoVersionConflict`].
+    pub async fn complete_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> Result<Todo, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let row = transaction
+            .query_opt(
+                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at",
+                &[&id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = row else {
+            let state = transaction
+                .query_opt(
+                    "SELECT version FROM todos WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL",
+                    &[&id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+            return match state {
+                Some(row) => Err(StorageError::TodoVersionConflict {
+                    todo_id: id,
+                    expected_version,
+                    actual_version: row.get(0),
+                }),
+                None => Err(StorageError::TodoNotFound { todo_id: id }),
+            };
+        };
+        let todo = todo_from_row(&row)?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(todo)
+    }
 }
 
 impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
@@ -518,6 +572,13 @@ impl crate::application::AsyncTodoRepository for PostgresTodoRepository {
     }
     fn list_todos(&self) -> crate::application::RepositoryFuture<'_, Vec<Todo>, Self::Error> {
         Box::pin(async move { Self::list_todos(self).await })
+    }
+    fn complete_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, Todo, Self::Error> {
+        Box::pin(async move { Self::complete_todo(self, id, expected_version).await })
     }
 }
 

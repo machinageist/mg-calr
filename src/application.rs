@@ -75,6 +75,13 @@ pub trait AsyncTodoRepository {
     /// # Errors
     /// Returns the repository's typed query error.
     fn list_todos(&self) -> RepositoryFuture<'_, Vec<Todo>, Self::Error>;
+    /// # Errors
+    /// Returns a typed persistence, not-found, or optimistic-lock error.
+    fn complete_todo(
+        &self,
+        id: TodoId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, Todo, Self::Error>;
 }
 
 #[derive(Debug, Error)]
@@ -91,6 +98,8 @@ pub enum ApplicationError<E: std::error::Error + 'static> {
 pub enum QueryError<E: std::error::Error + 'static> {
     #[error("event {event_id} was not found")]
     EventNotFound { event_id: EventId },
+    #[error("todo {todo_id} was not found")]
+    TodoNotFound { todo_id: TodoId },
     #[error("'{timezone}' is not a valid IANA timezone")]
     InvalidTimezone { timezone: String },
     #[error("the local day boundary for {date} is not representable in {timezone}")]
@@ -277,6 +286,34 @@ where
             .await
             .map_err(QueryError::Repository)?;
         Ok(todos.into_iter().map(TodoQueryProjection::from).collect())
+    }
+
+    /// # Errors
+    /// Returns a typed repository query error or [`QueryError::TodoNotFound`].
+    pub async fn show_todo_async(
+        &self,
+        todo_id: TodoId,
+    ) -> Result<TodoQueryProjection, QueryError<R::Error>> {
+        self.repository
+            .find_todo(todo_id)
+            .await
+            .map_err(QueryError::Repository)?
+            .map(TodoQueryProjection::from)
+            .ok_or(QueryError::TodoNotFound { todo_id })
+    }
+
+    /// # Errors
+    /// Returns domain or repository persistence/conflict errors.
+    pub async fn complete_todo_async(
+        &self,
+        todo_id: TodoId,
+        expected_version: i64,
+    ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
+        self.repository
+            .complete_todo(todo_id, expected_version)
+            .await
+            .map(TodoQueryProjection::from)
+            .map_err(ApplicationError::Repository)
     }
 }
 

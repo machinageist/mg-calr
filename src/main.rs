@@ -9,7 +9,7 @@ use mg_calr::application::{
     ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError, TodoUseCases,
 };
 use mg_calr::config;
-use mg_calr::domain::todo::{Priority, TodoDue};
+use mg_calr::domain::todo::{Priority, TodoDue, TodoId};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
 use mg_calr::storage::{
     self, MigrationState, PostgresCalendarEventRepository, PostgresTodoRepository, StorageError,
@@ -109,6 +109,18 @@ enum TodoCommand {
     Create(TodoCreateArgs),
     /// List todos in stable repository order.
     List,
+    /// Show one todo by its full stable ID.
+    Show {
+        #[arg(long)]
+        todo_id: TodoId,
+    },
+    /// Complete one live todo using its current optimistic-lock version.
+    Complete {
+        #[arg(long)]
+        todo_id: TodoId,
+        #[arg(long)]
+        version: i64,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -347,6 +359,7 @@ fn application_error(error: ApplicationError<StorageError>) -> AppError {
 fn query_error(error: QueryError<StorageError>) -> AppError {
     match error {
         QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
+        QueryError::TodoNotFound { todo_id } => AppError::TodoNotFound { todo_id },
         QueryError::InvalidTimezone { .. } | QueryError::InvalidDayBoundary { .. } => {
             AppError::InvalidInput(error.to_string())
         }
@@ -453,6 +466,22 @@ async fn run_todo_command(
                 .list_todos_async()
                 .await
                 .map_err(query_error)?,
+        ),
+        TodoCommand::Show { todo_id } => print_projection(
+            json,
+            "todo.show",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .show_todo_async(*todo_id)
+                .await
+                .map_err(query_error)?,
+        ),
+        TodoCommand::Complete { todo_id, version } => print_projection(
+            json,
+            "todo.complete",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .complete_todo_async(*todo_id, *version)
+                .await
+                .map_err(application_error)?,
         ),
     }
 }

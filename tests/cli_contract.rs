@@ -234,3 +234,23 @@ fn todo_create_rejects_mixed_due_forms_at_clap_boundary() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn todo_show_requires_todo_id_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["--json", "--no-input", "todo", "show"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--todo-id"));
+}
+
+#[test]
+fn todo_complete_requires_id_and_version_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["--json", "--no-input", "todo", "complete"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--todo-id"));
+}
