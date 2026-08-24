@@ -27,6 +27,7 @@ impl AppError {
             }
             Self::Storage(storage::StorageError::Connect(_)) => "database_unavailable",
             Self::Storage(storage::StorageError::MigrationDrift { .. }) => "migration_drift",
+            Self::Storage(storage::StorageError::CalendarNotLive { .. }) => "calendar_not_live",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
             Self::Serialization(_) => "serialization_error",
         }

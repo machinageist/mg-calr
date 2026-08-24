@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::domain::{Calendar, CalendarId, DomainError, Event, EventTime};
 use thiserror::Error;
 
@@ -15,6 +18,19 @@ pub trait CalendarEventRepository {
     /// # Errors
     /// Implementations return their transport/storage-specific error.
     fn save_event(&mut self, event: Event) -> Result<(), Self::Error>;
+}
+
+pub trait AsyncCalendarEventRepository {
+    type Error;
+
+    fn save_calendar<'a>(
+        &'a self,
+        calendar: &'a Calendar,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
+    fn save_event<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 }
 
 #[derive(Debug, Error)]
@@ -75,5 +91,45 @@ where
 
     pub fn into_repository(self) -> R {
         self.repository
+    }
+}
+
+impl<R> EventUseCases<R>
+where
+    R: AsyncCalendarEventRepository,
+    R::Error: std::error::Error + 'static,
+{
+    /// Construct and persist a calendar through an asynchronous repository.
+    ///
+    /// # Errors
+    /// Returns a domain validation error or the repository's error.
+    pub async fn create_calendar_async(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<Calendar, ApplicationError<R::Error>> {
+        let calendar = Calendar::new(name)?;
+        self.repository
+            .save_calendar(&calendar)
+            .await
+            .map_err(ApplicationError::Repository)?;
+        Ok(calendar)
+    }
+
+    /// Construct and persist an event through an asynchronous repository.
+    ///
+    /// # Errors
+    /// Returns a domain validation error or the repository's error.
+    pub async fn create_event_async(
+        &self,
+        calendar_id: CalendarId,
+        title: impl Into<String>,
+        time: EventTime,
+    ) -> Result<Event, ApplicationError<R::Error>> {
+        let event = Event::new(calendar_id, title, time)?;
+        self.repository
+            .save_event(&event)
+            .await
+            .map_err(ApplicationError::Repository)?;
+        Ok(event)
     }
 }

@@ -4,6 +4,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 
 use crate::config::ConnectionSettings;
+use crate::domain::{Calendar, CalendarId, Event, EventStatus, EventTime};
 
 pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundation.sql");
 
@@ -30,6 +31,8 @@ pub enum StorageError {
     Connect(#[source] tokio_postgres::Error),
     #[error("PostgreSQL operation failed: {0}")]
     Query(#[source] tokio_postgres::Error),
+    #[error("calendar {calendar_id} does not exist or is deleted")]
+    CalendarNotLive { calendar_id: CalendarId },
     #[error("migration version {version} is recorded as '{actual}', expected '{expected}'")]
     MigrationDrift {
         version: i64,
@@ -217,6 +220,132 @@ pub async fn migrate(settings: &ConnectionSettings) -> Result<Vec<MigrationState
 /// Returns the same connection, query, and drift errors as [`migration_status`].
 pub async fn doctor(settings: &ConnectionSettings) -> Result<Vec<MigrationState>, StorageError> {
     migration_status(settings).await
+}
+
+/// PostgreSQL-backed repository for calendar and event creation.
+#[derive(Debug, Clone)]
+pub struct PostgresCalendarEventRepository {
+    settings: ConnectionSettings,
+}
+
+impl PostgresCalendarEventRepository {
+    /// Create a repository using the supplied PostgreSQL connection settings.
+    #[must_use]
+    pub const fn new(settings: ConnectionSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Insert a calendar in a transaction.
+    ///
+    /// # Errors
+    /// Returns a database error; the transaction rolls back on failure.
+    pub async fn save_calendar(&self, calendar: &Calendar) -> Result<(), StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        transaction
+            .execute(
+                "INSERT INTO calendars (id, name, color, is_default, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &calendar.id.as_uuid(), &calendar.name, &calendar.color,
+                    &calendar.is_default, &calendar.created_at, &calendar.updated_at,
+                    &calendar.deleted_at,
+                ],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        transaction.commit().await.map_err(StorageError::Query)
+    }
+
+    /// Insert an event only when its calendar is live.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::CalendarNotLive`] when the parent calendar is
+    /// absent or soft-deleted, or a database error otherwise.
+    pub async fn save_event(&self, event: &Event) -> Result<(), StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let calendar_is_live = transaction
+            .query_opt(
+                "SELECT deleted_at IS NULL FROM calendars WHERE id = $1 FOR UPDATE",
+                &[&event.calendar_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .is_some_and(|row| row.get::<_, bool>(0));
+        if !calendar_is_live {
+            return Err(StorageError::CalendarNotLive {
+                calendar_id: event.calendar_id,
+            });
+        }
+
+        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &event.time {
+            EventTime::Timed {
+                start,
+                end,
+                timezone,
+            } => (
+                Some(timezone.as_str()),
+                Some(*start),
+                Some(*end),
+                None,
+                None,
+            ),
+            EventTime::AllDay {
+                start,
+                end_exclusive,
+            } => (None, None, None, Some(*start), Some(*end_exclusive)),
+        };
+        let status = event.metadata.status.map(event_status);
+        let extension_properties = serde_json::json!({
+            "categories": event.metadata.categories,
+            "alarms": event.metadata.alarms,
+            "organizer": event.metadata.organizer,
+            "attendees": event.metadata.attendees,
+        });
+        transaction
+            .execute(
+                "INSERT INTO events (id, calendar_id, rfc_uid, title, description, location, url, status, busy, timezone, starts_at, ends_at, all_day_start, all_day_end, recurrence_rule, extension_properties, created_at, updated_at, deleted_at, remote_tombstoned_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                &[
+                    &event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(),
+                    &event.title, &event.metadata.description, &event.metadata.location,
+                    &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at,
+                    &ends_at, &all_day_start, &all_day_end, &event.metadata.recurrence_rule,
+                    &extension_properties, &event.created_at, &event.updated_at,
+                    &event.deleted_at, &event.remote_tombstoned_at,
+                ],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        transaction.commit().await.map_err(StorageError::Query)
+    }
+}
+
+impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventRepository {
+    type Error = StorageError;
+
+    fn save_calendar<'a>(
+        &'a self,
+        calendar: &'a Calendar,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Self::Error>> + Send + 'a>>
+    {
+        Box::pin(async move { Self::save_calendar(self, calendar).await })
+    }
+
+    fn save_event<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Self::Error>> + Send + 'a>>
+    {
+        Box::pin(async move { Self::save_event(self, event).await })
+    }
+}
+
+fn event_status(status: EventStatus) -> &'static str {
+    match status {
+        EventStatus::Tentative => "tentative",
+        EventStatus::Confirmed => "confirmed",
+        EventStatus::Cancelled => "cancelled",
+    }
 }
 
 #[cfg(test)]
