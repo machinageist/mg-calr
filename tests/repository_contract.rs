@@ -80,6 +80,28 @@ fn event_cancel_contract_is_parameterized_and_version_guarded() {
 }
 
 #[test]
+fn event_restore_contract_is_parameterized_and_version_guarded() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("pub async fn restore_event"));
+    assert!(source.contains("UPDATE events SET deleted_at = NULL"));
+    assert!(source.contains("AND deleted_at IS NOT NULL AND version = $2"));
+    assert!(source.contains("EventVersionConflict"));
+    assert!(source.contains("EventNotFound"));
+    let restore_source = &source[source
+        .find("pub async fn restore_event")
+        .expect("restore implementation exists")..];
+    let cancelled_check = restore_source
+        .find("if row.get::<_, Option<DateTime<Utc>>>(1).is_none()")
+        .expect("restore checks cancelled events");
+    let version_check = restore_source
+        .find("if actual_version != expected_version")
+        .expect("restore checks optimistic version");
+    assert!(cancelled_check < version_check);
+    assert!(!source.contains("format!(\"UPDATE events"));
+}
+
+#[test]
 fn todo_complete_contract_is_parameterized_and_version_guarded() {
     let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
 

@@ -12,6 +12,16 @@ fn reminder_scan_contract_is_explicitly_dry_run_capable() {
 }
 
 #[test]
+fn event_restore_help_exposes_optimistic_arguments() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "restore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--event-id"))
+        .stdout(predicate::str::contains("--version"));
+}
+
+#[test]
 fn agenda_help_exposes_explicit_window_timezone_and_lifecycle_flags() {
     cargo_bin_cmd!("mg-calr")
         .args(["agenda", "--help"])

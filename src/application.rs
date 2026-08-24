@@ -59,6 +59,13 @@ pub trait AsyncCalendarEventRepository {
         expected_version: i64,
     ) -> RepositoryFuture<'_, Event, Self::Error>;
     /// # Errors
+    /// Returns a typed repository lifecycle error.
+    fn restore_event(
+        &self,
+        id: EventId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, Event, Self::Error>;
+    /// # Errors
     /// Returns the repository's typed query error.
     fn day_agenda(
         &self,
@@ -1224,6 +1231,23 @@ where
     {
         self.repository
             .cancel_event(event_id, expected_version)
+            .await
+            .map(EventProjection::from)
+            .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))
+    }
+
+    /// # Errors
+    /// Returns a typed optimistic lifecycle error.
+    pub async fn restore_event_async(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> Result<EventProjection, EventLifecycleError<R::Error>>
+    where
+        R::Error: EventLifecycleErrorMapping,
+    {
+        self.repository
+            .restore_event(event_id, expected_version)
             .await
             .map(EventProjection::from)
             .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))

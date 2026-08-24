@@ -734,6 +734,54 @@ impl PostgresCalendarEventRepository {
         Ok(event)
     }
 
+    /// Restore a cancelled event with an atomic optimistic-version check.
+    pub async fn restore_event(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> Result<Event, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let current = transaction
+            .query_opt(
+                "SELECT version, deleted_at FROM events WHERE id = $1 FOR UPDATE",
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = current else {
+            return Err(StorageError::EventNotFound { event_id });
+        };
+        if row.get::<_, Option<DateTime<Utc>>>(1).is_none() {
+            return Err(StorageError::EventNotFound { event_id });
+        }
+        let actual_version = row.get::<_, i64>(0);
+        if actual_version != expected_version {
+            return Err(StorageError::EventVersionConflict {
+                event_id,
+                expected_version,
+                actual_version,
+            });
+        }
+        transaction
+            .execute(
+                "UPDATE events SET deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NOT NULL AND version = $2",
+                &[&event_id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let event = transaction
+            .query_one(
+                &format!("{EVENT_SELECT} WHERE e.id = $1"),
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)
+            .and_then(|row| event_from_row(&row))?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(event)
+    }
+
     /// List live calendars in deterministic name/ID order.
     ///
     /// # Errors
@@ -1934,6 +1982,14 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
         expected_version: i64,
     ) -> crate::application::RepositoryFuture<'_, Event, Self::Error> {
         Box::pin(async move { Self::cancel_event(self, id, expected_version).await })
+    }
+
+    fn restore_event(
+        &self,
+        id: EventId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, Event, Self::Error> {
+        Box::pin(async move { Self::restore_event(self, id, expected_version).await })
     }
 
     fn day_agenda(

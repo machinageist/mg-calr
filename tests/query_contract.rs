@@ -64,6 +64,21 @@ impl AsyncCalendarEventRepository for QueryRepository {
         })
     }
 
+    fn restore_event(
+        &self,
+        id: EventId,
+        _expected_version: i64,
+    ) -> RepositoryFuture<'_, Event, Self::Error> {
+        Box::pin(async move {
+            Ok(self
+                .events
+                .iter()
+                .find(|event| event.id == id)
+                .cloned()
+                .unwrap())
+        })
+    }
+
     fn day_agenda(
         &self,
         date: NaiveDate,

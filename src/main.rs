@@ -162,6 +162,13 @@ enum EventCommand {
         #[arg(long)]
         version: i64,
     },
+    /// Restore one cancelled event using its current optimistic-lock version.
+    Restore {
+        #[arg(long)]
+        event_id: EventId,
+        #[arg(long)]
+        version: i64,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -658,7 +665,9 @@ async fn run_event_command(
     } else {
         None
     };
-    if let EventCommand::Cancel { version, .. } = &args.command {
+    if let EventCommand::Cancel { version, .. } | EventCommand::Restore { version, .. } =
+        &args.command
+    {
         if *version < 1 {
             return Err(AppError::InvalidInput(
                 "event version must be at least 1".to_owned(),
@@ -698,6 +707,13 @@ async fn run_event_command(
             json,
             "event.cancel",
             app.cancel_event_async(*event_id, *version)
+                .await
+                .map_err(event_lifecycle_error)?,
+        ),
+        EventCommand::Restore { event_id, version } => print_projection(
+            json,
+            "event.restore",
+            app.restore_event_async(*event_id, *version)
                 .await
                 .map_err(event_lifecycle_error)?,
         ),
