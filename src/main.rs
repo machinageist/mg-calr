@@ -227,6 +227,10 @@ struct TodoEditArgs {
     tag: Vec<TagId>,
     #[arg(long, conflicts_with = "tag")]
     clear_tags: bool,
+    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "clear_dependencies")]
+    depends_on: Vec<TodoId>,
+    #[arg(long, conflicts_with = "depends_on")]
+    clear_dependencies: bool,
 }
 
 #[derive(Debug, Args)]
@@ -480,6 +484,13 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
     } else {
         Some(args.tag.clone())
     };
+    let dependency_ids = if args.clear_dependencies {
+        Some(Vec::new())
+    } else if args.depends_on.is_empty() {
+        None
+    } else {
+        Some(args.depends_on.clone())
+    };
     let edit = TodoEdit {
         title: args.title.clone(),
         priority: args.priority,
@@ -488,6 +499,7 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
         project_id,
         parent_id,
         tag_ids,
+        dependency_ids,
     };
     if edit.is_empty() {
         return Err(AppError::InvalidInput(

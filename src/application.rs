@@ -147,6 +147,8 @@ pub struct TodoEdit {
     /// `None` preserves the existing parent; `Some(None)` clears it.
     pub parent_id: Option<Option<TodoId>>,
     pub tag_ids: Option<Vec<TagId>>,
+    /// `None` preserves dependencies; `Some` atomically replaces them.
+    pub dependency_ids: Option<Vec<TodoId>>,
 }
 
 impl TodoEdit {
@@ -159,6 +161,7 @@ impl TodoEdit {
             && self.project_id.is_none()
             && self.parent_id.is_none()
             && self.tag_ids.is_none()
+            && self.dependency_ids.is_none()
     }
 }
 
@@ -302,6 +305,7 @@ pub struct TodoQueryProjection {
     pub priority: crate::domain::todo::Priority,
     pub project_id: Option<crate::domain::todo::ProjectId>,
     pub tag_ids: Vec<TagId>,
+    pub dependency_ids: Vec<TodoId>,
     pub notes: Option<String>,
     pub parent_id: Option<TodoId>,
     pub completed_at: Option<DateTime<chrono::Utc>>,
@@ -320,6 +324,7 @@ impl From<Todo> for TodoQueryProjection {
             priority: todo.priority,
             project_id: todo.project_id,
             tag_ids: todo.tag_ids,
+            dependency_ids: todo.dependency_ids,
             notes: todo.notes,
             parent_id: todo.parent_id,
             completed_at: todo.completed_at,

@@ -420,3 +420,42 @@ fn todo_purge_requires_explicit_confirmation_without_database_access() {
         .stderr(predicate::str::contains("todo purge requires --yes"))
         .stderr(predicate::str::contains("no database was accessed"));
 }
+
+#[test]
+fn todo_edit_accepts_repeatable_dependency_assignment_and_clear() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--depends-on",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020001",
+            "--depends-on",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020002",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("database"));
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--clear-dependencies",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("database"));
+}

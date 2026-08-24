@@ -51,6 +51,11 @@ impl AppError {
             Self::Storage(storage::StorageError::ParentNotFound { .. }) => "parent_not_found",
             Self::Storage(storage::StorageError::SelfParent { .. }) => "todo_self_parent",
             Self::Storage(storage::StorageError::Cycle { .. }) => "todo_parent_cycle",
+            Self::Storage(storage::StorageError::DependencyNotFound { .. }) => {
+                "todo_dependency_not_found"
+            }
+            Self::Storage(storage::StorageError::SelfDependency { .. }) => "todo_self_dependency",
+            Self::Storage(storage::StorageError::DependencyCycle { .. }) => "todo_dependency_cycle",
             Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => "tag_already_exists",
             Self::Storage(storage::StorageError::TagNotFound { .. }) => "tag_not_found",
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => {
@@ -77,13 +82,16 @@ impl AppError {
             | Self::Storage(storage::StorageError::TagAlreadyExists { .. })
             | Self::Storage(storage::StorageError::TodoHasChildren { .. })
             | Self::Storage(storage::StorageError::SelfParent { .. })
-            | Self::Storage(storage::StorageError::Cycle { .. }) => 65,
+            | Self::Storage(storage::StorageError::Cycle { .. })
+            | Self::Storage(storage::StorageError::SelfDependency { .. })
+            | Self::Storage(storage::StorageError::DependencyCycle { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
             | Self::Storage(storage::StorageError::TodoNotTrashed { .. })
             | Self::Storage(storage::StorageError::TagNotFound { .. })
             | Self::Storage(storage::StorageError::ProjectNotFound { .. })
-            | Self::Storage(storage::StorageError::ParentNotFound { .. }) => 66,
+            | Self::Storage(storage::StorageError::ParentNotFound { .. })
+            | Self::Storage(storage::StorageError::DependencyNotFound { .. }) => 66,
             Self::Config(_) => 78,
             Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => 75,
             Self::Storage(_) => 69,

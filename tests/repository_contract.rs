@@ -127,3 +127,17 @@ fn todo_purge_contract_is_confirmed_version_guarded_and_transactional() {
     assert!(source.contains("transaction.commit().await"));
     assert!(!source.contains("format!(\"DELETE"));
 }
+
+#[test]
+fn todo_dependency_edit_contract_is_locked_cycle_checked_and_atomically_replaced() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("LOCK TABLE todo_dependencies IN SHARE ROW EXCLUSIVE MODE"));
+    assert!(source.contains("DependencyNotFound"));
+    assert!(source.contains("SelfDependency"));
+    assert!(source.contains("DependencyCycle"));
+    assert!(source.contains("WITH RECURSIVE edges AS"));
+    assert!(source.contains("DELETE FROM todo_dependencies WHERE dependent_id = $1"));
+    assert!(source.contains("INSERT INTO todo_dependencies (dependent_id, prerequisite_id)"));
+    assert!(source.contains("let dependency_ids = edit.dependency_ids.clone()"));
+}

@@ -65,6 +65,12 @@ pub enum StorageError {
     SelfParent { todo_id: TodoId },
     #[error("assigning parent would create a cycle for todo {todo_id}")]
     Cycle { todo_id: TodoId },
+    #[error("dependency todo {todo_id} does not exist or is not live")]
+    DependencyNotFound { todo_id: TodoId },
+    #[error("todo {todo_id} cannot depend on itself")]
+    SelfDependency { todo_id: TodoId },
+    #[error("adding dependencies would create a cycle for todo {todo_id}")]
+    DependencyCycle { todo_id: TodoId },
     #[error("tag '{normalized_name}' already exists")]
     TagAlreadyExists { normalized_name: String },
     #[error("tag {tag_id} does not exist")]
@@ -278,7 +284,8 @@ const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0
 
 const TODO_SELECT: &str = "SELECT t.id, t.parent_id, t.title, t.notes, t.due_date, t.due_at, \
     t.timezone, t.priority, t.project_id, t.completed_at, COALESCE(t.trashed_at, t.deleted_at) AS trashed_at, t.version, \
-    t.created_at, t.updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids FROM todos t";
+    t.created_at, t.updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = t.id ORDER BY tt.tag_id), ARRAY[]::uuid[]) AS tag_ids, \
+    COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = t.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[]) AS dependency_ids FROM todos t";
 const TODO_ORDER: &str = "ORDER BY CASE WHEN t.due_date IS NULL AND t.due_at IS NULL THEN 1 ELSE 0 END, \
     t.due_date NULLS LAST, t.due_at NULLS LAST, lower(t.title), t.id";
 
@@ -576,6 +583,39 @@ impl PostgresTodoRepository {
     pub async fn save_todo(&self, todo: &Todo) -> Result<(), StorageError> {
         let (mut client, _connection_task) = connect(&self.settings).await?;
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let mut dependency_uuids = todo
+            .dependency_ids
+            .iter()
+            .map(|dependency_id| dependency_id.as_uuid())
+            .collect::<Vec<_>>();
+        dependency_uuids.sort_unstable();
+        dependency_uuids.dedup();
+        if dependency_uuids.contains(&todo.id.as_uuid()) {
+            return Err(StorageError::SelfDependency { todo_id: todo.id });
+        }
+        if !dependency_uuids.is_empty() {
+            let live_count: i64 = transaction
+                .query_one(
+                    "SELECT COUNT(*) FROM todos WHERE id = ANY($1::uuid[]) AND trashed_at IS NULL AND deleted_at IS NULL",
+                    &[&dependency_uuids],
+                )
+                .await
+                .map_err(StorageError::Query)?
+                .get(0);
+            if usize::try_from(live_count).ok() != Some(dependency_uuids.len()) {
+                let missing = transaction
+                    .query_opt(
+                        "SELECT requested_id FROM UNNEST($1::uuid[]) AS requested_id LEFT JOIN todos t ON t.id = requested_id AND t.trashed_at IS NULL AND t.deleted_at IS NULL WHERE t.id IS NULL ORDER BY requested_id LIMIT 1",
+                        &[&dependency_uuids],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?
+                    .map_or(dependency_uuids[0], |row| row.get::<_, Uuid>(0));
+                return Err(StorageError::DependencyNotFound {
+                    todo_id: TodoId::from_uuid(missing),
+                });
+            }
+        }
         let (due_date, due_at, timezone) = match &todo.due {
             Some(TodoDue::Date { date, timezone }) => (Some(*date), None, Some(timezone.as_str())),
             Some(TodoDue::Timed { at, timezone }) => {
@@ -595,6 +635,15 @@ impl PostgresTodoRepository {
                 .execute(
                     "INSERT INTO todo_tags (todo_id, tag_id) VALUES ($1, $2)",
                     &[&todo.id.as_uuid(), &tag_id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+        }
+        for prerequisite_id in &dependency_uuids {
+            transaction
+                .execute(
+                    "INSERT INTO todo_dependencies (dependent_id, prerequisite_id) VALUES ($1, $2)",
+                    &[&todo.id.as_uuid(), prerequisite_id],
                 )
                 .await
                 .map_err(StorageError::Query)?;
@@ -647,7 +696,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET completed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND completed_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -689,7 +738,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -716,7 +765,7 @@ impl PostgresTodoRepository {
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
         let row = transaction
             .query_opt(
-                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET trashed_at = NULL, deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND (trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version],
             )
             .await
@@ -783,6 +832,13 @@ impl PostgresTodoRepository {
             .map_err(StorageError::Query)?;
         transaction
             .execute(
+                "DELETE FROM todo_dependencies WHERE dependent_id = $1 OR prerequisite_id = $1",
+                &[&id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        transaction
+            .execute(
                 "DELETE FROM todos WHERE id = $1 AND version = $2",
                 &[&id.as_uuid(), &expected_version],
             )
@@ -811,6 +867,12 @@ impl PostgresTodoRepository {
             .batch_execute("LOCK TABLE todos IN SHARE ROW EXCLUSIVE MODE")
             .await
             .map_err(StorageError::Query)?;
+        if edit.dependency_ids.is_some() {
+            transaction
+                .batch_execute("LOCK TABLE todo_dependencies IN SHARE ROW EXCLUSIVE MODE")
+                .await
+                .map_err(StorageError::Query)?;
+        }
         let (due_changed, due_date, due_at, timezone) = match edit.due {
             Some(TodoDue::Date { date, timezone }) => (true, Some(date), None, Some(timezone)),
             Some(TodoDue::Timed { at, timezone }) => {
@@ -828,6 +890,12 @@ impl PostgresTodoRepository {
         let parent_id = edit.parent_id.flatten().map(TodoId::as_uuid);
         let tag_ids = edit.tag_ids.clone().map(|ids| {
             let mut ids = ids.into_iter().map(TagId::as_uuid).collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        });
+        let dependency_ids = edit.dependency_ids.clone().map(|ids| {
+            let mut ids = ids.into_iter().map(TodoId::as_uuid).collect::<Vec<_>>();
             ids.sort_unstable();
             ids.dedup();
             ids
@@ -934,9 +1002,40 @@ impl PostgresTodoRepository {
                 });
             }
         }
+        if let Some(ids) = &dependency_ids {
+            if ids
+                .iter()
+                .any(|dependency_id| *dependency_id == id.as_uuid())
+            {
+                return Err(StorageError::SelfDependency { todo_id: id });
+            }
+            let live_ids = transaction
+                .query("SELECT id FROM todos WHERE id = ANY($1::uuid[]) AND trashed_at IS NULL AND deleted_at IS NULL", &[ids])
+                .await
+                .map_err(StorageError::Query)?
+                .into_iter()
+                .map(|row| row.get::<_, Uuid>(0))
+                .collect::<HashSet<_>>();
+            if let Some(missing) = ids
+                .iter()
+                .find(|dependency_id| !live_ids.contains(dependency_id))
+            {
+                return Err(StorageError::DependencyNotFound {
+                    todo_id: TodoId::from_uuid(*missing),
+                });
+            }
+            let cycle = transaction
+                .query_one("WITH RECURSIVE edges AS (SELECT dependent_id, prerequisite_id FROM todo_dependencies WHERE dependent_id <> $1 UNION ALL SELECT $1::uuid, unnest($2::uuid[])), reachable(todo_id) AS (SELECT prerequisite_id FROM edges WHERE dependent_id = $1 UNION SELECT edges.prerequisite_id FROM edges JOIN reachable ON edges.dependent_id = reachable.todo_id) SELECT EXISTS (SELECT 1 FROM reachable WHERE todo_id = $1)", &[&id.as_uuid(), ids])
+                .await
+                .map_err(StorageError::Query)?
+                .get::<_, bool>(0);
+            if cycle {
+                return Err(StorageError::DependencyCycle { todo_id: id });
+            }
+        }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[]), COALESCE(ARRAY(SELECT td.prerequisite_id FROM todo_dependencies td WHERE td.dependent_id = todos.id ORDER BY td.prerequisite_id), ARRAY[]::uuid[])",
                 &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id, &parent_changed, &parent_id],
             )
             .await
@@ -960,6 +1059,30 @@ impl PostgresTodoRepository {
                     .map_err(StorageError::Query)?;
             }
             todo.tag_ids = ids.into_iter().map(TagId::from_uuid).collect();
+        }
+        if let Some(ids) = dependency_ids {
+            transaction
+                .execute(
+                    "DELETE FROM todo_dependencies WHERE dependent_id = $1",
+                    &[&id.as_uuid()],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+            for prerequisite_id in &ids {
+                transaction
+                    .execute("INSERT INTO todo_dependencies (dependent_id, prerequisite_id) VALUES ($1, $2)", &[&id.as_uuid(), prerequisite_id])
+                    .await
+                    .map_err(StorageError::Query)?;
+            }
+            todo.dependency_ids = ids.into_iter().map(TodoId::from_uuid).collect();
+        } else {
+            todo.dependency_ids = transaction
+                .query("SELECT prerequisite_id FROM todo_dependencies WHERE dependent_id = $1 ORDER BY prerequisite_id", &[&id.as_uuid()])
+                .await
+                .map_err(StorageError::Query)?
+                .into_iter()
+                .map(|row| TodoId::from_uuid(row.get(0)))
+                .collect();
         }
         transaction.commit().await.map_err(StorageError::Query)?;
         Ok(todo)
@@ -1289,6 +1412,14 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
     } else {
         Vec::new()
     };
+    let dependency_ids = if row.len() > 15 {
+        row.get::<_, Vec<Uuid>>(15)
+            .into_iter()
+            .map(TodoId::from_uuid)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let priority = row
         .get::<_, String>(7)
         .parse::<Priority>()
@@ -1300,6 +1431,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, StorageError> {
         priority,
         project_id,
         tag_ids,
+        dependency_ids,
         notes: row.get(3),
         parent_id,
         completed_at: row.get(9),
