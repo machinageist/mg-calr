@@ -1,0 +1,75 @@
+pub mod config;
+pub mod domain;
+pub mod storage;
+
+use serde::Serialize;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error(transparent)]
+    Storage(#[from] storage::StorageError),
+    #[error("could not serialize output: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+impl AppError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Config(config::ConfigError::InvalidToml(_)) => "config_invalid",
+            Self::Config(_) => "config_unavailable",
+            Self::Storage(storage::StorageError::InvalidConfiguration(_)) => {
+                "database_config_invalid"
+            }
+            Self::Storage(storage::StorageError::Connect(_)) => "database_unavailable",
+            Self::Storage(storage::StorageError::MigrationDrift { .. }) => "migration_drift",
+            Self::Storage(storage::StorageError::Query(_)) => "database_error",
+            Self::Serialization(_) => "serialization_error",
+        }
+    }
+
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Config(_) => 78,
+            Self::Storage(_) => 69,
+            Self::Serialization(_) => 70,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Envelope<T: Serialize> {
+    pub schema_version: u8,
+    pub command: &'static str,
+    pub ok: bool,
+    pub data: T,
+}
+
+impl<T: Serialize> Envelope<T> {
+    #[must_use]
+    pub const fn success(command: &'static str, data: T) -> Self {
+        Self {
+            schema_version: 1,
+            command,
+            ok: true,
+            data,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorEnvelope<'a> {
+    pub schema_version: u8,
+    pub ok: bool,
+    pub error: ErrorBody<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorBody<'a> {
+    pub code: &'static str,
+    pub message: &'a str,
+}

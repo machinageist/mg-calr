@@ -1,0 +1,9 @@
+[database]
+# Default values shown explicitly. Omit this section to use them.
+socket_dir = "/run/postgresql"
+dbname = "mg_calr"
+# user = "your-os-user"
+
+# A URL is optional and takes precedence over peer fields in this file.
+# Prefer DATABASE_URL for temporary overrides. Never commit credentials.
+# url = "postgresql:///mg_calr"
