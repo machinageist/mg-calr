@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
@@ -177,6 +178,13 @@ enum TodoCommand {
         /// Confirm permanent deletion; without it no database is accessed.
         #[arg(long)]
         yes: bool,
+    },
+    /// Export all projects, tags, todos, and relationships as deterministic JSON.
+    Export,
+    /// Import a previously exported JSON document transactionally.
+    Import {
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 
@@ -719,6 +727,21 @@ async fn run_todo_command(
                     .purge_todo_async(*todo_id, *version)
                     .await
                     .map_err(application_error)?,
+            )
+        }
+        TodoCommand::Export => {
+            let payload = storage::export_todos(&database).await?;
+            println!("{}", serde_json::to_string(&payload)?);
+            Ok(())
+        }
+        TodoCommand::Import { file } => {
+            let input = std::fs::read_to_string(file)?;
+            let payload = storage::TodoExport::parse(&input)?;
+            let count = storage::import_todos(&database, &payload).await?;
+            print_debug(
+                json,
+                "todo.import",
+                serde_json::json!({ "imported": count }),
             )
         }
     }

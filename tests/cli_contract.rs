@@ -195,6 +195,31 @@ fn todo_create_no_input_requires_title_without_database_access() {
 }
 
 #[test]
+fn todo_import_validates_before_database_access_and_uses_stable_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("invalid.json");
+    std::fs::write(
+        &file,
+        r#"{"schema_version":2,"projects":[],"tags":[],"todos":[]}"#,
+    )
+    .unwrap();
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "import",
+            "--file",
+        ])
+        .arg(file)
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("\"code\":\"import_invalid\""));
+}
+
+#[test]
 fn todo_create_rejects_timezone_without_due_form_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args([

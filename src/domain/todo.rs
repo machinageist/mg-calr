@@ -134,6 +134,7 @@ impl Tag {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
