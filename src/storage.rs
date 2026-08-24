@@ -2223,8 +2223,9 @@ impl AsyncAgendaRepository for (PostgresCalendarEventRepository, PostgresTodoRep
 }
 
 /// Export all todo-related state in deterministic order.
-pub async fn export_todos(settings: &ConnectionSettings) -> Result<TodoExport, StorageError> {
-    let (client, _) = connect(settings).await?;
+async fn export_todos_from<C: tokio_postgres::GenericClient + Sync>(
+    client: &C,
+) -> Result<TodoExport, StorageError> {
     let projects = client.query("SELECT id, name, normalized_name, archived_at, version, created_at, updated_at FROM projects ORDER BY normalized_name, id", &[]).await.map_err(StorageError::Query)?.iter().map(project_from_row).collect::<Result<Vec<_>, _>>()?;
     let tags = client.query("SELECT id, name, normalized_name, created_at, updated_at FROM tags ORDER BY normalized_name, id", &[]).await.map_err(StorageError::Query)?.iter().map(tag_from_row).collect::<Result<Vec<_>, _>>()?;
     let todos = client
@@ -2240,6 +2241,11 @@ pub async fn export_todos(settings: &ConnectionSettings) -> Result<TodoExport, S
         tags,
         todos,
     })
+}
+
+pub async fn export_todos(settings: &ConnectionSettings) -> Result<TodoExport, StorageError> {
+    let (client, _) = connect(settings).await?;
+    export_todos_from(&client).await
 }
 
 /// Import a fully validated document atomically. No vault or other store is touched.
@@ -2342,8 +2348,9 @@ pub async fn import_todos(
 }
 
 /// Export all calendars and events, including cancelled/deleted lifecycle state.
-pub async fn export_events(settings: &ConnectionSettings) -> Result<EventExport, StorageError> {
-    let (client, _) = connect(settings).await?;
+async fn export_events_from<C: tokio_postgres::GenericClient + Sync>(
+    client: &C,
+) -> Result<EventExport, StorageError> {
     let calendars = client
         .query(
             "SELECT id, name, color, is_default, created_at, updated_at, deleted_at FROM calendars ORDER BY lower(name), id",
@@ -2366,6 +2373,41 @@ pub async fn export_events(settings: &ConnectionSettings) -> Result<EventExport,
         calendars,
         events,
     })
+}
+
+pub async fn export_events(settings: &ConnectionSettings) -> Result<EventExport, StorageError> {
+    let (client, _) = connect(settings).await?;
+    export_events_from(&client).await
+}
+
+pub async fn export_snapshot_sources(
+    settings: &ConnectionSettings,
+) -> Result<
+    (
+        EventExport,
+        TodoExport,
+        HashMap<Uuid, Option<DateTime<Utc>>>,
+    ),
+    StorageError,
+> {
+    let (mut client, _) = connect(settings).await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(StorageError::Query)?;
+    let events = export_events_from(&tx).await?;
+    let todos = export_todos_from(&tx).await?;
+    let todo_deleted = tx
+        .query("SELECT id, deleted_at FROM todos ORDER BY id", &[])
+        .await
+        .map_err(StorageError::Query)?
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    tx.commit().await.map_err(StorageError::Query)?;
+    Ok((events, todos, todo_deleted))
 }
 
 /// Import a fully validated calendar/event document atomically without overwriting.

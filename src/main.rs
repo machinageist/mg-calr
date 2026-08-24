@@ -57,11 +57,26 @@ enum Command {
     Todo(TodoArgs),
     /// Query the combined event and todo agenda.
     Agenda(AgendaArgs),
+    /// Export a read-only mg.interop/1 snapshot.
+    Interop(InteropArgs),
     /// Create and list projects.
     Project(ProjectArgs),
     Tag(TagArgs),
     /// Open the bounded keyboard-first agenda shell.
     Tui(TuiArgs),
+}
+
+#[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct InteropArgs {
+    #[command(subcommand)]
+    command: InteropCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum InteropCommand {
+    /// Export calendars, events, projects, tags, todos, and relationships.
+    Export,
 }
 
 #[derive(Debug, Args)]
@@ -1143,6 +1158,18 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
             run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
         Command::Agenda(agenda) => run_agenda_command(agenda, app_config.database, cli.json).await,
+        Command::Interop(interop) => match interop.command {
+            InteropCommand::Export => {
+                if !cli.json {
+                    return Err(AppError::InvalidInput(
+                        "interop export requires --json".to_owned(),
+                    ));
+                }
+                let snapshot = mg_calr::interop::export_snapshot(&app_config.database).await?;
+                println!("{}", serde_json::to_string(&snapshot)?);
+                Ok(())
+            }
+        },
         Command::Project(project) => {
             run_project_command(project, app_config.database, cli.json, cli.no_input).await
         }
