@@ -256,6 +256,43 @@ fn todo_complete_requires_id_and_version_without_database_access() {
 }
 
 #[test]
+fn todo_edit_accepts_parent_assignment_and_clear_flags() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--parent-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020001",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("database"));
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "todo",
+            "edit",
+            "--todo-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--clear-parent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("database"));
+}
+
+#[test]
 fn todo_edit_requires_id_and_version_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args(["--json", "--no-input", "todo", "edit"])

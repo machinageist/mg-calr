@@ -79,6 +79,15 @@ fn todo_edit_contract_is_atomic_parameterized_and_preserves_unspecified_fields()
     assert!(source.contains("due_date = CASE WHEN $5 THEN $6 ELSE due_date END"));
     assert!(source.contains("notes = CASE WHEN $9 THEN $10 ELSE notes END"));
     assert!(source.contains("project_id = CASE WHEN $11 THEN $12 ELSE project_id END"));
+    assert!(source.contains("parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END"));
+    assert!(
+        source.contains(
+            "SELECT parent_id, trashed_at, deleted_at FROM todos WHERE id = $1 FOR UPDATE"
+        )
+    );
+    assert!(source.contains("ParentNotFound"));
+    assert!(source.contains("SelfParent"));
+    assert!(source.contains("Cycle"));
     assert!(
         source.contains("SELECT id FROM projects WHERE id = $1 AND archived_at IS NULL FOR UPDATE")
     );

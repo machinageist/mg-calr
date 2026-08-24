@@ -144,6 +144,8 @@ pub struct TodoEdit {
     pub notes: Option<Option<String>>,
     /// `None` preserves the existing project; `Some(None)` clears it.
     pub project_id: Option<Option<ProjectId>>,
+    /// `None` preserves the existing parent; `Some(None)` clears it.
+    pub parent_id: Option<Option<TodoId>>,
     pub tag_ids: Option<Vec<TagId>>,
 }
 
@@ -155,6 +157,7 @@ impl TodoEdit {
             && self.due.is_none()
             && self.notes.is_none()
             && self.project_id.is_none()
+            && self.parent_id.is_none()
             && self.tag_ids.is_none()
     }
 }

@@ -195,6 +195,7 @@ struct TodoCreateArgs {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct TodoEditArgs {
     #[arg(long)]
     todo_id: TodoId,
@@ -218,6 +219,10 @@ struct TodoEditArgs {
     project_id: Option<ProjectId>,
     #[arg(long, conflicts_with = "project_id")]
     clear_project: bool,
+    #[arg(long, conflicts_with = "clear_parent")]
+    parent_id: Option<TodoId>,
+    #[arg(long, conflicts_with = "parent_id")]
+    clear_parent: bool,
     #[arg(long, action = clap::ArgAction::Append, conflicts_with = "clear_tags")]
     tag: Vec<TagId>,
     #[arg(long, conflicts_with = "tag")]
@@ -463,6 +468,11 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
     } else {
         args.project_id.map(Some)
     };
+    let parent_id = if args.clear_parent {
+        Some(None)
+    } else {
+        args.parent_id.map(Some)
+    };
     let tag_ids = if args.clear_tags {
         Some(Vec::new())
     } else if args.tag.is_empty() {
@@ -476,6 +486,7 @@ fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
         due,
         notes,
         project_id,
+        parent_id,
         tag_ids,
     };
     if edit.is_empty() {

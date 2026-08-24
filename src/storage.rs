@@ -1,4 +1,6 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
+use std::collections::HashSet;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,12 @@ pub enum StorageError {
     TodoNotTrashed { todo_id: TodoId },
     #[error("project {project_id} does not exist or is archived")]
     ProjectNotFound { project_id: ProjectId },
+    #[error("parent todo {todo_id} does not exist or is not live")]
+    ParentNotFound { todo_id: TodoId },
+    #[error("todo {todo_id} cannot be its own parent")]
+    SelfParent { todo_id: TodoId },
+    #[error("assigning parent would create a cycle for todo {todo_id}")]
+    Cycle { todo_id: TodoId },
     #[error("tag '{normalized_name}' already exists")]
     TagAlreadyExists { normalized_name: String },
     #[error("tag {tag_id} does not exist")]
@@ -797,6 +805,12 @@ impl PostgresTodoRepository {
     ) -> Result<Todo, StorageError> {
         let (mut client, _connection_task) = connect(&self.settings).await?;
         let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        // Serialize hierarchy edits before taking target/ancestor row locks so
+        // reciprocal assignments cannot acquire rows in opposite orders.
+        transaction
+            .batch_execute("LOCK TABLE todos IN SHARE ROW EXCLUSIVE MODE")
+            .await
+            .map_err(StorageError::Query)?;
         let (due_changed, due_date, due_at, timezone) = match edit.due {
             Some(TodoDue::Date { date, timezone }) => (true, Some(date), None, Some(timezone)),
             Some(TodoDue::Timed { at, timezone }) => {
@@ -810,6 +824,8 @@ impl PostgresTodoRepository {
         let notes = edit.notes.flatten();
         let project_changed = edit.project_id.is_some();
         let project_id = edit.project_id.flatten().map(ProjectId::as_uuid);
+        let parent_changed = edit.parent_id.is_some();
+        let parent_id = edit.parent_id.flatten().map(TodoId::as_uuid);
         let tag_ids = edit.tag_ids.clone().map(|ids| {
             let mut ids = ids.into_iter().map(TagId::as_uuid).collect::<Vec<_>>();
             ids.sort_unstable();
@@ -843,6 +859,52 @@ impl PostgresTodoRepository {
                 actual_version,
             });
         }
+        if let Some(parent_id) = parent_id {
+            if parent_id == id.as_uuid() {
+                return Err(StorageError::SelfParent { todo_id: id });
+            }
+            let parent = transaction
+                .query_opt(
+                    "SELECT parent_id, trashed_at, deleted_at FROM todos WHERE id = $1 FOR UPDATE",
+                    &[&parent_id],
+                )
+                .await
+                .map_err(StorageError::Query)?;
+            let Some(parent) = parent else {
+                return Err(StorageError::ParentNotFound {
+                    todo_id: TodoId::from_uuid(parent_id),
+                });
+            };
+            if parent
+                .get::<_, Option<chrono::DateTime<chrono::Utc>>>(1)
+                .is_some()
+                || parent
+                    .get::<_, Option<chrono::DateTime<chrono::Utc>>>(2)
+                    .is_some()
+            {
+                return Err(StorageError::ParentNotFound {
+                    todo_id: TodoId::from_uuid(parent_id),
+                });
+            }
+            let mut ancestor = parent.get::<_, Option<Uuid>>(0);
+            let mut visited = HashSet::new();
+            while let Some(ancestor_id) = ancestor {
+                if !visited.insert(ancestor_id) {
+                    return Err(StorageError::Cycle { todo_id: id });
+                }
+                if ancestor_id == id.as_uuid() {
+                    return Err(StorageError::Cycle { todo_id: id });
+                }
+                ancestor = transaction
+                    .query_opt(
+                        "SELECT parent_id FROM todos WHERE id = $1 FOR UPDATE",
+                        &[&ancestor_id],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?
+                    .and_then(|row| row.get::<_, Option<Uuid>>(0));
+            }
+        }
         if let Some(ids) = &tag_ids {
             for tag_id in ids {
                 if transaction
@@ -874,8 +936,8 @@ impl PostgresTodoRepository {
         }
         let row = transaction
             .query_opt(
-                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
-                &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id],
+                "UPDATE todos SET title = COALESCE($3, title), priority = COALESCE($4, priority), due_date = CASE WHEN $5 THEN $6 ELSE due_date END, due_at = CASE WHEN $5 THEN $7 ELSE due_at END, timezone = CASE WHEN $5 THEN $8 ELSE timezone END, notes = CASE WHEN $9 THEN $10 ELSE notes END, project_id = CASE WHEN $11 THEN $12 ELSE project_id END, parent_id = CASE WHEN $13 THEN $14 ELSE parent_id END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND trashed_at IS NULL AND deleted_at IS NULL AND version = $2 RETURNING id, parent_id, title, notes, due_date, due_at, timezone, priority, project_id, completed_at, COALESCE(trashed_at, deleted_at) AS trashed_at, version, created_at, updated_at, COALESCE(ARRAY(SELECT tt.tag_id FROM todo_tags tt WHERE tt.todo_id = todos.id ORDER BY tt.tag_id), ARRAY[]::uuid[])",
+                &[&id.as_uuid(), &expected_version, &title, &priority, &due_changed, &due_date, &due_at, &timezone, &notes_changed, &notes, &project_changed, &project_id, &parent_changed, &parent_id],
             )
             .await
             .map_err(StorageError::Query)?;
