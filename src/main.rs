@@ -548,6 +548,7 @@ fn query_error(error: QueryError<StorageError>) -> AppError {
             AppError::InvalidInput(error.to_string())
         }
         QueryError::Repository(error) => AppError::Storage(error),
+        QueryError::Domain(error) => AppError::Todo(error),
     }
 }
 

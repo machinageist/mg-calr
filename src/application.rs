@@ -1,10 +1,11 @@
 #![allow(clippy::missing_errors_doc)]
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, TimeZone};
 use chrono_tz::Tz;
 use serde::Serialize;
 use thiserror::Error;
@@ -125,6 +126,19 @@ pub trait AsyncTodoRepository {
     ) -> RepositoryFuture<'_, Vec<ReminderDelivery>, Self::Error>;
 }
 
+/// Read-only persistence boundary for one combined agenda snapshot.
+pub trait AsyncAgendaRepository {
+    type Error;
+
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn agenda_events(&self, include_trashed: bool)
+    -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn agenda_todos(&self, include_trashed: bool) -> RepositoryFuture<'_, Vec<Todo>, Self::Error>;
+}
+
 /// Asynchronous persistence boundary for project metadata.
 pub trait AsyncTagRepository {
     type Error;
@@ -205,6 +219,8 @@ pub enum QueryError<E: std::error::Error + 'static> {
     InvalidDayBoundary { date: NaiveDate, timezone: String },
     #[error("repository operation failed: {0}")]
     Repository(E),
+    #[error(transparent)]
+    Domain(#[from] crate::domain::todo::TodoError),
 }
 
 /// Stable project query projection consumed by both human and JSON renderers.
@@ -331,6 +347,288 @@ pub struct TodoQueryProjection {
     pub version: i64,
     pub created_at: DateTime<chrono::Utc>,
     pub updated_at: DateTime<chrono::Utc>,
+}
+
+/// The source kind of one agenda row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgendaKind {
+    Event,
+    Todo,
+}
+
+/// A normalized, stable row in a combined agenda result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgendaItem {
+    pub kind: AgendaKind,
+    pub id: String,
+    pub title: String,
+    pub due: Option<TodoDue>,
+    pub event_time: Option<EventTime>,
+    pub priority: Option<Priority>,
+    pub occurrence_index: Option<u32>,
+    pub completed: bool,
+    pub trashed: bool,
+    pub blocked: bool,
+}
+
+/// Half-open civil-date bounds and lifecycle filters for an agenda query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgendaQuery {
+    pub start: NaiveDate,
+    pub end_exclusive: NaiveDate,
+    pub timezone: String,
+    pub include_completed: bool,
+    pub include_trashed: bool,
+    pub include_blocked: bool,
+}
+
+impl AgendaQuery {
+    #[must_use]
+    pub fn new(start: NaiveDate, end_exclusive: NaiveDate) -> Self {
+        Self {
+            start,
+            end_exclusive,
+            timezone: "UTC".to_owned(),
+            include_completed: false,
+            include_trashed: false,
+            include_blocked: true,
+        }
+    }
+
+    pub fn with_timezone(
+        mut self,
+        timezone: impl Into<String>,
+    ) -> Result<Self, crate::domain::todo::TodoError> {
+        let timezone = timezone.into();
+        timezone
+            .parse::<Tz>()
+            .map_err(|_| crate::domain::todo::TodoError::InvalidTimezone {
+                timezone: timezone.clone(),
+            })?;
+        self.timezone = timezone;
+        Ok(self)
+    }
+
+    pub fn try_new(
+        start: NaiveDate,
+        end_exclusive: NaiveDate,
+        timezone: impl Into<String>,
+    ) -> Result<Self, crate::domain::todo::TodoError> {
+        Self::new(start, end_exclusive).with_timezone(timezone)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgendaOutput {
+    pub start: NaiveDate,
+    pub end_exclusive: NaiveDate,
+    pub items: Vec<AgendaItem>,
+}
+
+impl AgendaOutput {
+    /// # Errors
+    /// Returns an invalid query, timezone, day-boundary, or recurrence error.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn from_snapshot(
+        query: AgendaQuery,
+        events: Vec<Event>,
+        todos: Vec<Todo>,
+    ) -> Result<Self, QueryError<Infallible>> {
+        if query.start >= query.end_exclusive {
+            return Err(QueryError::Domain(
+                crate::domain::todo::TodoError::InvalidRecurrenceRange,
+            ));
+        }
+        let zone = query
+            .timezone
+            .parse::<Tz>()
+            .map_err(|_| QueryError::InvalidTimezone {
+                timezone: query.timezone.clone(),
+            })?;
+        let window_start = local_day_boundary(zone, query.start, &query.timezone)?;
+        let window_end = local_day_boundary(zone, query.end_exclusive, &query.timezone)?;
+        let live_ids: std::collections::HashSet<TodoId> = todos
+            .iter()
+            .filter(|todo| todo.trashed_at.is_none() && todo.completed_at.is_none())
+            .map(|todo| todo.id)
+            .collect();
+        let mut items = Vec::new();
+        for event in events {
+            let overlaps = match &event.time {
+                EventTime::AllDay {
+                    start,
+                    end_exclusive,
+                } => *start < query.end_exclusive && *end_exclusive > query.start,
+                EventTime::Timed { start, end, .. } => {
+                    start.with_timezone(&zone) < window_end
+                        && end.with_timezone(&zone) > window_start
+                }
+            };
+            if overlaps && event.deleted_at.is_none() {
+                items.push(AgendaItem {
+                    kind: AgendaKind::Event,
+                    id: event.id.to_string(),
+                    title: event.title,
+                    due: None,
+                    event_time: Some(event.time),
+                    priority: None,
+                    occurrence_index: None,
+                    completed: false,
+                    trashed: event.deleted_at.is_some(),
+                    blocked: false,
+                });
+            }
+        }
+        let through = query.end_exclusive.pred_opt().ok_or(QueryError::Domain(
+            crate::domain::todo::TodoError::InvalidRecurrenceRange,
+        ))?;
+        for todo in todos {
+            let completed = todo.completed_at.is_some();
+            let trashed = todo.trashed_at.is_some();
+            let blocked = todo.dependency_ids.iter().any(|id| live_ids.contains(id));
+            if (!query.include_completed && completed)
+                || (!query.include_trashed && trashed)
+                || (!query.include_blocked && blocked)
+            {
+                continue;
+            }
+            for (index, due) in
+                agenda_due_instances(&todo, query.start, through, zone, window_start, window_end)
+                    .map_err(QueryError::Domain)?
+            {
+                items.push(AgendaItem {
+                    kind: AgendaKind::Todo,
+                    id: todo.id.to_string(),
+                    title: todo.title.clone(),
+                    due: Some(due),
+                    event_time: None,
+                    priority: Some(todo.priority),
+                    occurrence_index: Some(index),
+                    completed,
+                    trashed,
+                    blocked,
+                });
+            }
+        }
+        items.sort_by_key(|item| agenda_order(item, zone));
+        Ok(Self {
+            start: query.start,
+            end_exclusive: query.end_exclusive,
+            items,
+        })
+    }
+}
+
+fn agenda_due_instances(
+    todo: &Todo,
+    from: NaiveDate,
+    through: NaiveDate,
+    query_zone: Tz,
+    window_start: chrono::DateTime<Tz>,
+    window_end: chrono::DateTime<Tz>,
+) -> Result<Vec<(u32, TodoDue)>, crate::domain::todo::TodoError> {
+    let Some(due) = &todo.due else {
+        return Ok(Vec::new());
+    };
+    let (expansion_start, expansion_end) = match due {
+        TodoDue::Date { .. } => (from, through),
+        TodoDue::Timed { timezone, .. } => {
+            let stored_zone = timezone.parse::<Tz>().map_err(|_| {
+                crate::domain::todo::TodoError::InvalidTimezone {
+                    timezone: timezone.clone(),
+                }
+            })?;
+            // Expand a small civil-date cushion in the stored recurrence zone,
+            // then apply the actual instant window in the query zone.
+            (
+                window_start
+                    .with_timezone(&stored_zone)
+                    .date_naive()
+                    .checked_sub_signed(Duration::days(2))
+                    .ok_or(crate::domain::todo::TodoError::InvalidRecurrenceRange)?,
+                window_end
+                    .with_timezone(&stored_zone)
+                    .date_naive()
+                    .checked_add_signed(Duration::days(2))
+                    .ok_or(crate::domain::todo::TodoError::InvalidRecurrenceRange)?,
+            )
+        }
+    };
+    let instances = todo.expand_due_instances_indexed(expansion_start, expansion_end)?;
+    Ok(instances
+        .into_iter()
+        .filter(|(_, due)| match due {
+            TodoDue::Date { date, .. } => from <= *date && *date <= through,
+            TodoDue::Timed { at, .. } => {
+                let instant = at.with_timezone(&query_zone);
+                instant >= window_start && instant < window_end
+            }
+        })
+        .collect())
+}
+
+fn map_agenda_error<E: std::error::Error + 'static>(
+    error: QueryError<Infallible>,
+) -> QueryError<E> {
+    match error {
+        QueryError::InvalidTimezone { timezone } => QueryError::InvalidTimezone { timezone },
+        QueryError::InvalidDayBoundary { date, timezone } => {
+            QueryError::InvalidDayBoundary { date, timezone }
+        }
+        QueryError::Domain(error) => QueryError::Domain(error),
+        QueryError::Repository(error) => match error {},
+        QueryError::EventNotFound { event_id } => QueryError::EventNotFound { event_id },
+        QueryError::TodoNotFound { todo_id } => QueryError::TodoNotFound { todo_id },
+        QueryError::ProjectNotFound { project_id } => QueryError::ProjectNotFound { project_id },
+    }
+}
+
+fn local_day_boundary(
+    zone: Tz,
+    date: NaiveDate,
+    timezone: &str,
+) -> Result<chrono::DateTime<Tz>, QueryError<Infallible>> {
+    match zone.from_local_datetime(&date.and_time(chrono::NaiveTime::MIN)) {
+        LocalResult::Single(value) => Ok(value),
+        LocalResult::Ambiguous(_, _) | LocalResult::None => Err(QueryError::InvalidDayBoundary {
+            date,
+            timezone: timezone.to_owned(),
+        }),
+    }
+}
+
+fn agenda_order(item: &AgendaItem, zone: Tz) -> (NaiveDate, u8, String, String, u32) {
+    let date = item
+        .due
+        .as_ref()
+        .map(|due| todo_due_date(due, zone))
+        .or_else(|| {
+            item.event_time
+                .as_ref()
+                .map(|time| event_time_date(time, zone))
+        })
+        .unwrap_or(NaiveDate::MAX);
+    (
+        date,
+        u8::from(item.kind != AgendaKind::Event),
+        item.title.to_lowercase(),
+        item.id.clone(),
+        item.occurrence_index.unwrap_or(0),
+    )
+}
+
+fn todo_due_date(due: &TodoDue, zone: Tz) -> NaiveDate {
+    match due {
+        TodoDue::Date { date, .. } => *date,
+        TodoDue::Timed { at, .. } => at.with_timezone(&zone).date_naive(),
+    }
+}
+
+fn event_time_date(time: &EventTime, zone: Tz) -> NaiveDate {
+    match time {
+        EventTime::AllDay { start, .. } => *start,
+        EventTime::Timed { start, .. } => start.with_timezone(&zone).date_naive(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -706,6 +1004,50 @@ where
             .scan_reminders(at, dry_run)
             .await
             .map_err(QueryError::Repository)
+    }
+}
+
+/// Application boundary for one combined, read-only agenda query.
+pub struct AgendaUseCases<R> {
+    repository: R,
+}
+
+impl<R> AgendaUseCases<R> {
+    #[must_use]
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+}
+
+impl<R> AgendaUseCases<R>
+where
+    R: AsyncAgendaRepository,
+    R::Error: std::error::Error + 'static,
+{
+    /// Query events and todo recurrence instances, then apply lifecycle
+    /// filters and deterministic ordering to the shared snapshot.
+    pub async fn query_async(
+        &self,
+        query: AgendaQuery,
+    ) -> Result<AgendaOutput, QueryError<R::Error>> {
+        let zone = query
+            .timezone
+            .parse::<Tz>()
+            .map_err(|_| QueryError::InvalidTimezone {
+                timezone: query.timezone.clone(),
+            })?;
+        local_day_boundary(zone, query.start, &query.timezone).map_err(map_agenda_error)?;
+        local_day_boundary(zone, query.end_exclusive, &query.timezone).map_err(map_agenda_error)?;
+        let (events, todos) = tokio::join!(
+            self.repository.agenda_events(query.include_trashed),
+            self.repository.agenda_todos(query.include_trashed)
+        );
+        AgendaOutput::from_snapshot(
+            query,
+            events.map_err(QueryError::Repository)?,
+            todos.map_err(QueryError::Repository)?,
+        )
+        .map_err(map_agenda_error)
     }
 }
 

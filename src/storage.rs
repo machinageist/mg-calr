@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
-use crate::application::{ReminderDelivery, TodoEdit};
+use crate::application::{AsyncAgendaRepository, ReminderDelivery, TodoEdit};
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
@@ -690,6 +690,14 @@ impl PostgresCalendarEventRepository {
         &self,
         calendar_id: Option<CalendarId>,
     ) -> Result<Vec<Event>, StorageError> {
+        self.list_events_with_trashed(calendar_id, false).await
+    }
+
+    pub async fn list_events_with_trashed(
+        &self,
+        calendar_id: Option<CalendarId>,
+        _include_trashed: bool,
+    ) -> Result<Vec<Event>, StorageError> {
         let (client, _connection_task) = connect(&self.settings).await?;
         let calendar_uuid = calendar_id.map(CalendarId::as_uuid);
         let rows = client
@@ -955,9 +963,16 @@ impl PostgresTodoRepository {
     /// # Errors
     /// Returns connection, query, or invalid stored-data errors.
     pub async fn list_todos(&self) -> Result<Vec<Todo>, StorageError> {
+        self.list_todos_with_trashed(false).await
+    }
+
+    pub async fn list_todos_with_trashed(
+        &self,
+        include_trashed: bool,
+    ) -> Result<Vec<Todo>, StorageError> {
         let (client, _connection_task) = connect(&self.settings).await?;
         let rows = client
-            .query(&format!("{TODO_SELECT} {TODO_ORDER}"), &[])
+            .query(&format!("{TODO_SELECT} WHERE t.deleted_at IS NULL AND ($1 OR t.trashed_at IS NULL) {TODO_ORDER}"), &[&include_trashed])
             .await
             .map_err(StorageError::Query)?;
         rows.iter().map(todo_from_row).collect()
@@ -1835,6 +1850,24 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
     ) -> crate::application::RepositoryFuture<'_, Vec<Event>, Self::Error> {
         let timezone = timezone.to_owned();
         Box::pin(async move { Self::day_agenda(self, date, &timezone, starts_at, ends_at).await })
+    }
+}
+
+impl AsyncAgendaRepository for (PostgresCalendarEventRepository, PostgresTodoRepository) {
+    type Error = StorageError;
+
+    fn agenda_events(
+        &self,
+        include_trashed: bool,
+    ) -> crate::application::RepositoryFuture<'_, Vec<Event>, Self::Error> {
+        Box::pin(async move { self.0.list_events_with_trashed(None, include_trashed).await })
+    }
+
+    fn agenda_todos(
+        &self,
+        include_trashed: bool,
+    ) -> crate::application::RepositoryFuture<'_, Vec<Todo>, Self::Error> {
+        Box::pin(async move { self.1.list_todos_with_trashed(include_trashed).await })
     }
 }
 

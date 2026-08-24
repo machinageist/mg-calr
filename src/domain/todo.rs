@@ -399,6 +399,18 @@ impl Todo {
         from: NaiveDate,
         through: NaiveDate,
     ) -> Result<Vec<TodoDue>, TodoError> {
+        Ok(self
+            .expand_due_instances_indexed(from, through)?
+            .into_iter()
+            .map(|(_, due)| due)
+            .collect())
+    }
+
+    pub fn expand_due_instances_indexed(
+        &self,
+        from: NaiveDate,
+        through: NaiveDate,
+    ) -> Result<Vec<(u32, TodoDue)>, TodoError> {
         if from > through {
             return Err(TodoError::InvalidRecurrenceRange);
         }
@@ -407,7 +419,7 @@ impl Todo {
         };
         let Some(rule) = &self.recurrence else {
             return Ok(if from <= due_date(due) && due_date(due) <= through {
-                vec![due.clone()]
+                vec![(0, due.clone())]
             } else {
                 Vec::new()
             });
@@ -422,7 +434,7 @@ impl Todo {
                 break;
             }
             if date >= from {
-                result.push(current.clone());
+                result.push((occurrence, current.clone()));
             }
             if rule.count.is_some_and(|count| occurrence + 1 >= count) {
                 break;
