@@ -132,19 +132,31 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 },
             )
         }
-        Command::Doctor | Command::Init => {
-            let command = if matches!(cli.command, Command::Doctor) {
-                "doctor"
-            } else {
-                "init"
-            };
+        Command::Doctor => {
             let migrations = storage::doctor(&app_config.database).await?;
             print_output(
                 cli.json,
-                command,
+                "doctor",
                 DoctorOutput {
                     connection: app_config.database.safe_summary(),
                     database_reachable: true,
+                    migrations,
+                    administrator_guidance: Vec::new(),
+                },
+            )
+        }
+        Command::Init => {
+            let (database_reachable, migrations) = match storage::doctor(&app_config.database).await
+            {
+                Ok(migrations) => (true, migrations),
+                Err(_) => (false, Vec::new()),
+            };
+            print_output(
+                cli.json,
+                "init",
+                DoctorOutput {
+                    connection: app_config.database.safe_summary(),
+                    database_reachable,
                     migrations,
                     administrator_guidance: vec![
                         "Install PostgreSQL 18 using the operating system package manager.".to_owned(),

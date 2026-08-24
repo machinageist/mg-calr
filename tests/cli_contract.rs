@@ -51,3 +51,19 @@ fn invalid_configuration_is_a_stable_json_error() {
         .code(78)
         .stderr(predicate::str::contains("\"code\":\"config_invalid\""));
 }
+
+#[test]
+fn init_reports_unavailable_database_without_failing_or_mutating() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "init",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"command\":\"init\""))
+        .stdout(predicate::str::contains("\"database_reachable\":false"))
+        .stdout(predicate::str::contains("administrator_guidance"));
+}
