@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -13,6 +15,20 @@ pub enum DomainError {
         value: String,
         reason: String,
     },
+    #[error("{field} must not be empty")]
+    EmptyField { field: &'static str },
+    #[error("{field} must not contain control characters")]
+    ControlCharacter { field: &'static str },
+    #[error("timed events require an IANA timezone")]
+    MissingTimezone,
+    #[error("'{timezone}' is not a valid IANA timezone")]
+    InvalidTimezone { timezone: String },
+    #[error("timed event end must be after start")]
+    EndNotAfterStart,
+    #[error("all-day event end must be after start and is exclusive")]
+    InvalidAllDayRange,
+    #[error("RFC UID must be stable and contain no whitespace")]
+    InvalidRfcUid,
 }
 
 macro_rules! domain_id {
@@ -85,3 +101,220 @@ domain_id!(TodoId, "todo");
 domain_id!(ReminderId, "reminder");
 domain_id!(DeliveryId, "reminder delivery");
 domain_id!(AuditId, "audit record");
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct RfcUid(String);
+
+impl RfcUid {
+    /// Derive the UID once from the immutable event ID; edits never regenerate it.
+    #[must_use]
+    pub fn for_event(id: EventId) -> Self {
+        Self(format!("{id}@mg-calr.local"))
+    }
+
+    /// # Errors
+    /// Returns an error when the UID is empty or contains whitespace.
+    pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+        let value = value.into();
+        if value.trim().is_empty() || value.chars().any(char::is_whitespace) {
+            return Err(DomainError::InvalidRfcUid);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RfcUid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Calendar {
+    pub id: CalendarId,
+    pub name: String,
+    pub color: Option<String>,
+    pub is_default: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+impl Calendar {
+    /// Create a live calendar with standard lifecycle metadata.
+    ///
+    /// # Errors
+    /// Returns an error for an empty or control-character name.
+    pub fn new(name: impl Into<String>) -> Result<Self, DomainError> {
+        let name = validate_text("calendar name", name.into())?;
+        let now = Utc::now();
+        Ok(Self {
+            id: CalendarId::new(),
+            name,
+            color: None,
+            is_default: false,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventTime {
+    Timed {
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+        timezone: String,
+    },
+    AllDay {
+        start: NaiveDate,
+        /// Exclusive end date, matching RFC 5545 DATE ranges.
+        end_exclusive: NaiveDate,
+    },
+}
+
+impl EventTime {
+    /// # Errors
+    /// Rejects missing/unknown IANA zones and non-positive timed ranges.
+    pub fn timed(
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+        timezone: impl Into<String>,
+    ) -> Result<Self, DomainError> {
+        if end <= start {
+            return Err(DomainError::EndNotAfterStart);
+        }
+        let timezone = timezone.into();
+        if timezone.trim().is_empty() {
+            return Err(DomainError::MissingTimezone);
+        }
+        if timezone.parse::<Tz>().is_err() {
+            return Err(DomainError::InvalidTimezone { timezone });
+        }
+        Ok(Self::Timed {
+            start,
+            end,
+            timezone,
+        })
+    }
+
+    /// # Errors
+    /// Rejects an empty or backwards all-day half-open range.
+    pub fn all_day(start: NaiveDate, end_exclusive: NaiveDate) -> Result<Self, DomainError> {
+        if end_exclusive <= start {
+            return Err(DomainError::InvalidAllDayRange);
+        }
+        Ok(Self::AllDay {
+            start,
+            end_exclusive,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventStatus {
+    Tentative,
+    Confirmed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alarm {
+    pub offset_seconds: Option<i64>,
+    pub absolute_at: Option<DateTime<FixedOffset>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventMetadata {
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub url: Option<String>,
+    pub status: Option<EventStatus>,
+    pub busy: bool,
+    pub categories: Vec<String>,
+    pub recurrence_rule: Option<String>,
+    pub alarms: Vec<Alarm>,
+    pub organizer: Option<String>,
+    pub attendees: Vec<String>,
+}
+
+impl Default for EventMetadata {
+    fn default() -> Self {
+        Self {
+            description: None,
+            location: None,
+            url: None,
+            status: None,
+            busy: true,
+            categories: Vec::new(),
+            recurrence_rule: None,
+            alarms: Vec::new(),
+            organizer: None,
+            attendees: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    pub id: EventId,
+    pub calendar_id: CalendarId,
+    pub rfc_uid: RfcUid,
+    pub title: String,
+    pub time: EventTime,
+    #[serde(flatten)]
+    pub metadata: EventMetadata,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub remote_tombstoned_at: Option<DateTime<Utc>>,
+}
+
+impl Event {
+    /// Create an event; the generated RFC UID is tied to its immutable ID.
+    ///
+    /// # Errors
+    /// Returns an error for an empty/control-character title or invalid time.
+    pub fn new(
+        calendar_id: CalendarId,
+        title: impl Into<String>,
+        time: EventTime,
+    ) -> Result<Self, DomainError> {
+        let title = validate_text("event title", title.into())?;
+        let id = EventId::new();
+        let now = Utc::now();
+        Ok(Self {
+            id,
+            calendar_id,
+            rfc_uid: RfcUid::for_event(id),
+            title,
+            time,
+            metadata: EventMetadata::default(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            remote_tombstoned_at: None,
+        })
+    }
+}
+
+fn validate_text(field: &'static str, value: String) -> Result<String, DomainError> {
+    if value.trim().is_empty() {
+        return Err(DomainError::EmptyField { field });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(DomainError::ControlCharacter { field });
+    }
+    Ok(value)
+}
