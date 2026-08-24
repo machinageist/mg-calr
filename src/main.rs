@@ -6,11 +6,14 @@ use std::str::FromStr;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
-    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError,
+    ApplicationError, CalendarProjection, EventProjection, EventUseCases, QueryError, TodoUseCases,
 };
 use mg_calr::config;
+use mg_calr::domain::todo::{Priority, TodoDue};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
-use mg_calr::storage::{self, MigrationState, PostgresCalendarEventRepository, StorageError};
+use mg_calr::storage::{
+    self, MigrationState, PostgresCalendarEventRepository, PostgresTodoRepository, StorageError,
+};
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
 use serde::Serialize;
 
@@ -44,6 +47,8 @@ enum Command {
     Calendar(CalendarArgs),
     /// Create and query events.
     Event(EventArgs),
+    /// Create and query todos.
+    Todo(TodoArgs),
 }
 
 #[derive(Debug, Args)]
@@ -90,6 +95,34 @@ enum EventCommand {
         #[arg(long)]
         timezone: String,
     },
+}
+
+#[derive(Debug, Args)]
+struct TodoArgs {
+    #[command(subcommand)]
+    command: TodoCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TodoCommand {
+    /// Create one todo, optionally with a due date or instant.
+    Create(TodoCreateArgs),
+    /// List todos in stable repository order.
+    List,
+}
+
+#[derive(Debug, Args)]
+struct TodoCreateArgs {
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long, default_value = "none")]
+    priority: Priority,
+    #[arg(long, conflicts_with = "due_at")]
+    due_date: Option<NaiveDate>,
+    #[arg(long, conflicts_with = "due_date")]
+    due_at: Option<DateTime<FixedOffset>>,
+    #[arg(long)]
+    timezone: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -282,9 +315,31 @@ fn event_time(args: &EventCreateArgs, no_input: bool) -> Result<EventTime, AppEr
     }
 }
 
+fn todo_due(args: &TodoCreateArgs, no_input: bool) -> Result<Option<TodoDue>, AppError> {
+    if args.due_date.is_none() && args.due_at.is_none() {
+        if args.timezone.is_some() {
+            return Err(AppError::InvalidInput(
+                "--timezone requires --due-date or --due-at".to_owned(),
+            ));
+        }
+        return Ok(None);
+    }
+    let timezone = required(args.timezone.clone(), no_input, "timezone", "IANA timezone")?;
+    match (args.due_date, args.due_at) {
+        (Some(date), None) => TodoDue::date(date, timezone)
+            .map(Some)
+            .map_err(AppError::from),
+        (None, Some(at)) => TodoDue::timed(at, timezone)
+            .map(Some)
+            .map_err(AppError::from),
+        _ => unreachable!("clap prevents both todo due forms"),
+    }
+}
+
 fn application_error(error: ApplicationError<StorageError>) -> AppError {
     match error {
         ApplicationError::Domain(error) => AppError::Domain(error),
+        ApplicationError::Todo(error) => AppError::Todo(error),
         ApplicationError::Repository(error) => AppError::Storage(error),
     }
 }
@@ -375,6 +430,33 @@ async fn run_event_command(
     }
 }
 
+async fn run_todo_command(
+    args: &TodoArgs,
+    database: config::ConnectionSettings,
+    json: bool,
+    no_input: bool,
+) -> Result<(), AppError> {
+    match &args.command {
+        TodoCommand::Create(args) => {
+            let title = required(args.title.clone(), no_input, "title", "Todo title")?;
+            let due = todo_due(args, no_input)?;
+            let todo = TodoUseCases::new(PostgresTodoRepository::new(database))
+                .create_todo_async(title, args.priority, due)
+                .await
+                .map_err(application_error)?;
+            print_projection(json, "todo.create", todo)
+        }
+        TodoCommand::List => print_projections(
+            json,
+            "todo.list",
+            TodoUseCases::new(PostgresTodoRepository::new(database))
+                .list_todos_async()
+                .await
+                .map_err(query_error)?,
+        ),
+    }
+}
+
 async fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
     let app_config = config::load(cli.database_url.clone())?;
@@ -451,6 +533,9 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }
         Command::Event(event) => {
             run_event_command(event, app_config.database, cli.json, cli.no_input).await
+        }
+        Command::Todo(todo) => {
+            run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
     }
 }

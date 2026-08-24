@@ -180,3 +180,57 @@ fn event_create_rejects_unknown_iana_timezone_without_database_access() {
         .code(65)
         .stderr(predicate::str::contains("valid IANA timezone"));
 }
+
+#[test]
+fn todo_create_no_input_requires_title_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["--json", "--no-input", "todo", "create"])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains(
+            "\"code\":\"required_input_missing\"",
+        ))
+        .stderr(predicate::str::contains("title"));
+}
+
+#[test]
+fn todo_create_rejects_timezone_without_due_form_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "todo",
+            "create",
+            "--title",
+            "Write tests",
+            "--timezone",
+            "America/Los_Angeles",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("\"code\":\"invalid_input\""))
+        .stderr(predicate::str::contains("requires --due-date or --due-at"));
+}
+
+#[test]
+fn todo_create_rejects_mixed_due_forms_at_clap_boundary() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--no-input",
+            "todo",
+            "create",
+            "--title",
+            "Write tests",
+            "--due-date",
+            "2026-08-24",
+            "--due-at",
+            "2026-08-24T09:00:00-07:00",
+            "--timezone",
+            "America/Los_Angeles",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}

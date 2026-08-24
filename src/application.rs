@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::domain::{
     Calendar, CalendarId, DomainError, Event, EventId, EventTime,
-    todo::{Todo, TodoDue, TodoId},
+    todo::{Priority, Todo, TodoDue, TodoId},
 };
 
 /// Boxed asynchronous repository operation used at the transport boundary.
@@ -81,6 +81,8 @@ pub trait AsyncTodoRepository {
 pub enum ApplicationError<E: std::error::Error + 'static> {
     #[error(transparent)]
     Domain(#[from] DomainError),
+    #[error(transparent)]
+    Todo(#[from] crate::domain::todo::TodoError),
     #[error("repository operation failed: {0}")]
     Repository(E),
 }
@@ -205,6 +207,76 @@ impl From<Todo> for TodoQueryProjection {
             created_at: todo.created_at,
             updated_at: todo.updated_at,
         }
+    }
+}
+
+impl fmt::Display for TodoQueryProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}\t{}\t{}", self.id, self.title, self.priority)?;
+        match &self.due {
+            Some(due) => write!(formatter, "\t{due:?}")?,
+            None => formatter.write_str("\tno-due")?,
+        }
+        if let Some(project_id) = self.project_id {
+            write!(formatter, "\tproject={project_id}")?;
+        }
+        if let Some(parent_id) = self.parent_id {
+            write!(formatter, "\tparent={parent_id}")?;
+        }
+        if self.completed_at.is_some() {
+            formatter.write_str("\tcompleted")?;
+        }
+        if self.trashed_at.is_some() {
+            formatter.write_str("\ttrashed")?;
+        }
+        Ok(())
+    }
+}
+
+/// Application boundary for todo creation and query projection.
+pub struct TodoUseCases<R> {
+    repository: R,
+}
+
+impl<R> TodoUseCases<R> {
+    #[must_use]
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+}
+
+impl<R> TodoUseCases<R>
+where
+    R: AsyncTodoRepository,
+    R::Error: std::error::Error + 'static,
+{
+    /// # Errors
+    /// Returns domain validation or asynchronous repository persistence errors.
+    pub async fn create_todo_async(
+        &self,
+        title: impl Into<String>,
+        priority: Priority,
+        due: Option<TodoDue>,
+    ) -> Result<TodoQueryProjection, ApplicationError<R::Error>> {
+        let mut todo = Todo::new(title)?;
+        todo.priority = priority;
+        todo.due = due;
+        self.repository
+            .save_todo(&todo)
+            .await
+            .map_err(ApplicationError::Repository)?;
+        Ok(TodoQueryProjection::from(todo))
+    }
+
+    /// # Errors
+    /// Returns a typed repository query error.
+    pub async fn list_todos_async(&self) -> Result<Vec<TodoQueryProjection>, QueryError<R::Error>> {
+        let todos = self
+            .repository
+            .list_todos()
+            .await
+            .map_err(QueryError::Repository)?;
+        Ok(todos.into_iter().map(TodoQueryProjection::from).collect())
     }
 }
 
