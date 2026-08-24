@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use mg_calr::application::{
-    AsyncCalendarEventRepository, EventUseCases, QueryError, RepositoryFuture,
+    AsyncCalendarEventRepository, EventEdit, EventUseCases, QueryError, RepositoryFuture,
 };
 use mg_calr::domain::{Calendar, CalendarId, Event, EventId, EventTime};
 
@@ -69,6 +69,22 @@ impl AsyncCalendarEventRepository for QueryRepository {
         id: EventId,
         _expected_version: i64,
     ) -> RepositoryFuture<'_, Event, Self::Error> {
+        Box::pin(async move {
+            Ok(self
+                .events
+                .iter()
+                .find(|event| event.id == id)
+                .cloned()
+                .unwrap())
+        })
+    }
+
+    fn edit_event<'a>(
+        &'a self,
+        id: EventId,
+        _expected_version: i64,
+        _edit: &'a EventEdit,
+    ) -> RepositoryFuture<'a, Event, Self::Error> {
         Box::pin(async move {
             Ok(self
                 .events

@@ -8,8 +8,8 @@ use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
-    CalendarProjection, EventLifecycleError, EventProjection, EventUseCases, ProjectUseCases,
-    QueryError, TagUseCases, TodoEdit, TodoUseCases,
+    CalendarProjection, EventEdit, EventLifecycleError, EventProjection, EventUseCases,
+    ProjectUseCases, QueryError, TagUseCases, TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
@@ -141,6 +141,8 @@ struct EventArgs {
 enum EventCommand {
     /// Create one explicit timed or all-day event.
     Create(EventCreateArgs),
+    /// Edit title and/or one complete temporal form using its current optimistic-lock version.
+    Edit(EventEditArgs),
     /// Show one live event by its full stable ID.
     Show { event_id: EventId },
     /// List live events, optionally scoped to a calendar.
@@ -308,6 +310,26 @@ struct TodoEditArgs {
 struct EventCreateArgs {
     #[arg(long)]
     calendar: Option<CalendarId>,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    start: Option<DateTime<FixedOffset>>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    end: Option<DateTime<FixedOffset>>,
+    #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
+    timezone: Option<String>,
+    #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
+    all_day_start: Option<NaiveDate>,
+    #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
+    all_day_end: Option<NaiveDate>,
+}
+
+#[derive(Debug, Args)]
+struct EventEditArgs {
+    #[arg(long)]
+    event_id: EventId,
+    #[arg(long)]
+    version: i64,
     #[arg(long)]
     title: Option<String>,
     #[arg(long, conflicts_with_all = ["all_day_start", "all_day_end"])]
@@ -494,6 +516,48 @@ fn event_time(args: &EventCreateArgs, no_input: bool) -> Result<EventTime, AppEr
     }
 }
 
+fn event_edit(args: &EventEditArgs) -> Result<EventEdit, AppError> {
+    let has_timed = args.start.is_some() || args.end.is_some() || args.timezone.is_some();
+    let has_all_day = args.all_day_start.is_some() || args.all_day_end.is_some();
+    if has_timed && has_all_day {
+        return Err(AppError::InvalidInput(
+            "event edit cannot mix timed and all-day fields".to_owned(),
+        ));
+    }
+    let time = if has_timed {
+        let start = args.start.ok_or_else(|| {
+            AppError::InvalidInput("event edit timed form requires --start".to_owned())
+        })?;
+        let end = args.end.ok_or_else(|| {
+            AppError::InvalidInput("event edit timed form requires --end".to_owned())
+        })?;
+        let timezone = args.timezone.clone().ok_or_else(|| {
+            AppError::InvalidInput("event edit timed form requires --timezone".to_owned())
+        })?;
+        Some(EventTime::timed(start, end, timezone)?)
+    } else if has_all_day {
+        let start = args.all_day_start.ok_or_else(|| {
+            AppError::InvalidInput("event edit all-day form requires --all-day-start".to_owned())
+        })?;
+        let end = args.all_day_end.ok_or_else(|| {
+            AppError::InvalidInput("event edit all-day form requires --all-day-end".to_owned())
+        })?;
+        Some(EventTime::all_day(start, end)?)
+    } else {
+        None
+    };
+    let edit = EventEdit {
+        title: args.title.clone(),
+        time,
+    };
+    if edit.is_empty() {
+        return Err(AppError::InvalidInput(
+            "event edit requires at least one editable field".to_owned(),
+        ));
+    }
+    Ok(edit)
+}
+
 fn todo_due(args: &TodoCreateArgs, no_input: bool) -> Result<Option<TodoDue>, AppError> {
     if args.due_date.is_none() && args.due_at.is_none() {
         if args.timezone.is_some() {
@@ -665,8 +729,14 @@ async fn run_event_command(
     } else {
         None
     };
-    if let EventCommand::Cancel { version, .. } | EventCommand::Restore { version, .. } =
-        &args.command
+    let edit_input = if let EventCommand::Edit(args) = &args.command {
+        Some(event_edit(args)?)
+    } else {
+        None
+    };
+    if let EventCommand::Cancel { version, .. }
+    | EventCommand::Restore { version, .. }
+    | EventCommand::Edit(EventEditArgs { version, .. }) = &args.command
     {
         if *version < 1 {
             return Err(AppError::InvalidInput(
@@ -683,6 +753,18 @@ async fn run_event_command(
                 .await
                 .map_err(application_error)?;
             print_projection(json, "event.create", EventProjection::from(event))
+        }
+        EventCommand::Edit(args) => {
+            let edit = edit_input.ok_or_else(|| {
+                AppError::InvalidInput("event edit input was not constructed".to_owned())
+            })?;
+            print_projection(
+                json,
+                "event.edit",
+                app.edit_event_async(args.event_id, args.version, edit)
+                    .await
+                    .map_err(application_error)?,
+            )
         }
         EventCommand::Show { event_id } => print_projection(
             json,

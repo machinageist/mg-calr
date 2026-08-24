@@ -10,8 +10,8 @@ use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
 use crate::application::{
-    AsyncAgendaRepository, EventLifecycleError, EventLifecycleErrorMapping, ReminderDelivery,
-    TodoEdit,
+    AsyncAgendaRepository, EventEdit, EventLifecycleError, EventLifecycleErrorMapping,
+    ReminderDelivery, TodoEdit,
 };
 use crate::config::ConnectionSettings;
 use crate::domain::{
@@ -767,6 +767,84 @@ impl PostgresCalendarEventRepository {
             .execute(
                 "UPDATE events SET deleted_at = NULL, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NOT NULL AND version = $2",
                 &[&event_id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let event = transaction
+            .query_one(
+                &format!("{EVENT_SELECT} WHERE e.id = $1"),
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)
+            .and_then(|row| event_from_row(&row))?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(event)
+    }
+
+    /// Edit title and/or temporal columns atomically with an optimistic version check.
+    pub async fn edit_event(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+        edit: &EventEdit,
+    ) -> Result<Event, StorageError> {
+        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &edit.time {
+            Some(EventTime::Timed {
+                start,
+                end,
+                timezone,
+            }) => (
+                Some(timezone.clone()),
+                Some(start.with_timezone(&Utc)),
+                Some(end.with_timezone(&Utc)),
+                None,
+                None,
+            ),
+            Some(EventTime::AllDay {
+                start,
+                end_exclusive,
+            }) => (None, None, None, Some(*start), Some(*end_exclusive)),
+            None => (None, None, None, None, None),
+        };
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let current = transaction
+            .query_opt(
+                "SELECT version, deleted_at FROM events WHERE id = $1 FOR UPDATE",
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = current else {
+            return Err(StorageError::EventNotFound { event_id });
+        };
+        if row.get::<_, Option<DateTime<Utc>>>(1).is_some() {
+            return Err(StorageError::EventNotFound { event_id });
+        }
+        let actual_version = row.get::<_, i64>(0);
+        if actual_version != expected_version {
+            return Err(StorageError::EventVersionConflict {
+                event_id,
+                expected_version,
+                actual_version,
+            });
+        }
+        let time_changed = edit.time.is_some();
+        transaction
+            .execute(
+                "UPDATE events SET title = COALESCE($3, title), timezone = CASE WHEN $4 THEN $5 ELSE timezone END, starts_at = CASE WHEN $4 THEN $6 ELSE starts_at END, ends_at = CASE WHEN $4 THEN $7 ELSE ends_at END, all_day_start = CASE WHEN $4 THEN $8 ELSE all_day_start END, all_day_end = CASE WHEN $4 THEN $9 ELSE all_day_end END, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL AND version = $2",
+                &[
+                    &event_id.as_uuid(),
+                    &expected_version,
+                    &edit.title,
+                    &time_changed,
+                    &timezone,
+                    &starts_at,
+                    &ends_at,
+                    &all_day_start,
+                    &all_day_end,
+                ],
             )
             .await
             .map_err(StorageError::Query)?;
@@ -1990,6 +2068,15 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
         expected_version: i64,
     ) -> crate::application::RepositoryFuture<'_, Event, Self::Error> {
         Box::pin(async move { Self::restore_event(self, id, expected_version).await })
+    }
+
+    fn edit_event<'a>(
+        &'a self,
+        id: EventId,
+        expected_version: i64,
+        edit: &'a EventEdit,
+    ) -> crate::application::RepositoryFuture<'a, Event, Self::Error> {
+        Box::pin(async move { Self::edit_event(self, id, expected_version, edit).await })
     }
 
     fn day_agenda(

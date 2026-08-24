@@ -66,6 +66,14 @@ pub trait AsyncCalendarEventRepository {
         expected_version: i64,
     ) -> RepositoryFuture<'_, Event, Self::Error>;
     /// # Errors
+    /// Returns a typed repository lifecycle error.
+    fn edit_event<'a>(
+        &'a self,
+        id: EventId,
+        expected_version: i64,
+        edit: &'a EventEdit,
+    ) -> RepositoryFuture<'a, Event, Self::Error>;
+    /// # Errors
     /// Returns the repository's typed query error.
     fn day_agenda(
         &self,
@@ -74,6 +82,20 @@ pub trait AsyncCalendarEventRepository {
         starts_at: DateTime<FixedOffset>,
         ends_at: DateTime<FixedOffset>,
     ) -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+}
+
+/// Explicitly supplied fields for one optimistic event edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventEdit {
+    pub title: Option<String>,
+    pub time: Option<EventTime>,
+}
+
+impl EventEdit {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.title.is_none() && self.time.is_none()
+    }
 }
 
 /// Asynchronous persistence boundary for the local-only todo store.
@@ -1251,6 +1273,56 @@ where
             .await
             .map(EventProjection::from)
             .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))
+    }
+
+    /// Edit the title and/or complete explicit temporal form using the
+    /// caller-supplied optimistic version.
+    pub async fn edit_event_async(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+        edit: EventEdit,
+    ) -> Result<EventProjection, ApplicationError<R::Error>> {
+        if expected_version < 1 {
+            return Err(ApplicationError::Domain(DomainError::InvalidEventVersion));
+        }
+        if edit.is_empty() {
+            return Err(ApplicationError::Domain(DomainError::EmptyField {
+                field: "editable field",
+            }));
+        }
+        if let Some(title) = &edit.title {
+            Event::new(
+                CalendarId::new(),
+                title.clone(),
+                EventTime::all_day(
+                    NaiveDate::MIN,
+                    NaiveDate::MIN.succ_opt().unwrap_or(NaiveDate::MAX),
+                )?,
+            )?;
+        }
+        if let Some(time) = &edit.time {
+            match time {
+                EventTime::Timed {
+                    start,
+                    end,
+                    timezone,
+                } => {
+                    EventTime::timed(*start, *end, timezone.clone())?;
+                }
+                EventTime::AllDay {
+                    start,
+                    end_exclusive,
+                } => {
+                    EventTime::all_day(*start, *end_exclusive)?;
+                }
+            }
+        }
+        self.repository
+            .edit_event(event_id, expected_version, &edit)
+            .await
+            .map(EventProjection::from)
+            .map_err(ApplicationError::Repository)
     }
 
     /// # Errors

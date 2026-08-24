@@ -12,6 +12,61 @@ fn reminder_scan_contract_is_explicitly_dry_run_capable() {
 }
 
 #[test]
+fn event_edit_help_exposes_optimistic_and_temporal_arguments() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "edit", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--event-id"))
+        .stdout(predicate::str::contains("--version"))
+        .stdout(predicate::str::contains("--start"))
+        .stdout(predicate::str::contains("--all-day-start"));
+}
+
+#[test]
+fn event_edit_rejects_partial_temporal_form_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "event",
+            "edit",
+            "--event-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+            "--start",
+            "2026-08-24T09:00:00-07:00",
+            "--timezone",
+            "America/Los_Angeles",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("requires --end"));
+}
+
+#[test]
+fn event_edit_rejects_empty_update_without_database_access() {
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--no-input",
+            "event",
+            "edit",
+            "--event-id",
+            "018fd2c0-2f14-7b1a-9e3b-4abef1020000",
+            "--version",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(65)
+        .stderr(predicate::str::contains("at least one editable field"));
+}
+
+#[test]
 fn event_restore_help_exposes_optimistic_arguments() {
     cargo_bin_cmd!("mg-calr")
         .args(["event", "restore", "--help"])
