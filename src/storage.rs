@@ -9,7 +9,10 @@ use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
-use crate::application::{AsyncAgendaRepository, ReminderDelivery, TodoEdit};
+use crate::application::{
+    AsyncAgendaRepository, EventLifecycleError, EventLifecycleErrorMapping, ReminderDelivery,
+    TodoEdit,
+};
 use crate::config::ConnectionSettings;
 use crate::domain::{
     Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
@@ -23,6 +26,7 @@ pub const FOUNDATION_MIGRATION: &str = include_str!("../migrations/0001_foundati
 pub const TODO_CORE_MIGRATION: &str = include_str!("../migrations/0002_todo_core.sql");
 pub const TODO_RECURRENCE_MIGRATION: &str = include_str!("../migrations/0003_todo_recurrence.sql");
 pub const TODO_REMINDERS_MIGRATION: &str = include_str!("../migrations/0004_todo_reminders.sql");
+pub const EVENT_LIFECYCLE_MIGRATION: &str = include_str!("../migrations/0005_event_lifecycle.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -52,6 +56,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "todo_reminders",
         sql: TODO_REMINDERS_MIGRATION,
     },
+    Migration {
+        version: 5,
+        name: "event_lifecycle",
+        sql: EVENT_LIFECYCLE_MIGRATION,
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -68,6 +77,16 @@ pub enum StorageError {
     CalendarNotLive { calendar_id: CalendarId },
     #[error("todo {todo_id} does not exist or is trashed")]
     TodoNotFound { todo_id: TodoId },
+    #[error("event {event_id} does not exist or is cancelled")]
+    EventNotFound { event_id: EventId },
+    #[error(
+        "event {event_id} version conflict: expected {expected_version}, actual {actual_version}"
+    )]
+    EventVersionConflict {
+        event_id: EventId,
+        expected_version: i64,
+        actual_version: i64,
+    },
     #[error("todo {todo_id} has child todos and cannot be purged")]
     TodoHasChildren { todo_id: TodoId },
     #[error("todo {todo_id} is not trashed")]
@@ -114,6 +133,26 @@ pub enum StorageError {
         actual: String,
         expected: &'static str,
     },
+}
+
+impl EventLifecycleErrorMapping for StorageError {
+    fn map_event_lifecycle_error(
+        self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> EventLifecycleError<Self> {
+        match self {
+            Self::EventNotFound { .. } => EventLifecycleError::NotFound { event_id },
+            Self::EventVersionConflict { actual_version, .. } => {
+                EventLifecycleError::VersionConflict {
+                    event_id,
+                    expected_version,
+                    actual_version,
+                }
+            }
+            error => EventLifecycleError::Repository(error),
+        }
+    }
 }
 
 /// Versioned, lossless interchange document for local todo state.
@@ -538,7 +577,7 @@ pub async fn doctor(settings: &ConnectionSettings) -> Result<Vec<MigrationState>
 const EVENT_SELECT: &str = "SELECT e.id, e.calendar_id, e.rfc_uid, e.title, e.description, e.location, \
     e.url, e.status, e.busy, e.timezone, e.starts_at, e.ends_at, e.all_day_start, \
     e.all_day_end, e.recurrence_rule, e.extension_properties, e.created_at, e.updated_at, \
-    e.deleted_at, e.remote_tombstoned_at FROM events e JOIN calendars c ON c.id = e.calendar_id";
+    e.deleted_at, e.remote_tombstoned_at, e.version FROM events e JOIN calendars c ON c.id = e.calendar_id";
 const EVENT_ORDER: &str = "ORDER BY CASE WHEN e.all_day_start IS NOT NULL THEN 0 ELSE 1 END, \
     COALESCE(e.all_day_start, (e.starts_at AT TIME ZONE 'UTC')::date), \
     e.starts_at NULLS FIRST, lower(e.title), e.id";
@@ -632,19 +671,67 @@ impl PostgresCalendarEventRepository {
         });
         transaction
             .execute(
-                "INSERT INTO events (id, calendar_id, rfc_uid, title, description, location, url, status, busy, timezone, starts_at, ends_at, all_day_start, all_day_end, recurrence_rule, extension_properties, created_at, updated_at, deleted_at, remote_tombstoned_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                "INSERT INTO events (id, calendar_id, rfc_uid, title, description, location, url, status, busy, timezone, starts_at, ends_at, all_day_start, all_day_end, recurrence_rule, extension_properties, created_at, updated_at, deleted_at, remote_tombstoned_at, version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
                 &[
                     &event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(),
                     &event.title, &event.metadata.description, &event.metadata.location,
                     &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at,
                     &ends_at, &all_day_start, &all_day_end, &event.metadata.recurrence_rule,
                     &extension_properties, &event.created_at, &event.updated_at,
-                    &event.deleted_at, &event.remote_tombstoned_at,
+                    &event.deleted_at, &event.remote_tombstoned_at, &event.version,
                 ],
             )
             .await
             .map_err(StorageError::Query)?;
         transaction.commit().await.map_err(StorageError::Query)
+    }
+
+    /// Cancel a live event with an atomic optimistic-version check.
+    pub async fn cancel_event(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> Result<Event, StorageError> {
+        let (mut client, _connection_task) = connect(&self.settings).await?;
+        let transaction = client.transaction().await.map_err(StorageError::Query)?;
+        let current = transaction
+            .query_opt(
+                "SELECT version, deleted_at FROM events WHERE id = $1 FOR UPDATE",
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let Some(row) = current else {
+            return Err(StorageError::EventNotFound { event_id });
+        };
+        if row.get::<_, Option<DateTime<Utc>>>(1).is_some() {
+            return Err(StorageError::EventNotFound { event_id });
+        }
+        let actual_version = row.get::<_, i64>(0);
+        if actual_version != expected_version {
+            return Err(StorageError::EventVersionConflict {
+                event_id,
+                expected_version,
+                actual_version,
+            });
+        }
+        transaction
+            .execute(
+                "UPDATE events SET deleted_at = CURRENT_TIMESTAMP, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL AND version = $2",
+                &[&event_id.as_uuid(), &expected_version],
+            )
+            .await
+            .map_err(StorageError::Query)?;
+        let event = transaction
+            .query_one(
+                &format!("{EVENT_SELECT} WHERE e.id = $1"),
+                &[&event_id.as_uuid()],
+            )
+            .await
+            .map_err(StorageError::Query)
+            .and_then(|row| event_from_row(&row))?;
+        transaction.commit().await.map_err(StorageError::Query)?;
+        Ok(event)
     }
 
     /// List live calendars in deterministic name/ID order.
@@ -1841,6 +1928,14 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
         Box::pin(async move { Self::list_events(self, calendar_id).await })
     }
 
+    fn cancel_event(
+        &self,
+        id: EventId,
+        expected_version: i64,
+    ) -> crate::application::RepositoryFuture<'_, Event, Self::Error> {
+        Box::pin(async move { Self::cancel_event(self, id, expected_version).await })
+    }
+
     fn day_agenda(
         &self,
         date: NaiveDate,
@@ -2240,6 +2335,7 @@ fn event_from_row(row: &Row) -> Result<Event, StorageError> {
         row.get(17),
         row.get(18),
         row.get(19),
+        row.get(20),
     )
     .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
 }

@@ -24,6 +24,14 @@ pub enum AppError {
     InvalidInput(String),
     #[error("event {event_id} was not found")]
     EventNotFound { event_id: domain::EventId },
+    #[error(
+        "event {event_id} version conflict: expected {expected_version}, actual {actual_version}"
+    )]
+    EventVersionConflict {
+        event_id: domain::EventId,
+        expected_version: i64,
+        actual_version: i64,
+    },
     #[error("todo {todo_id} was not found")]
     TodoNotFound { todo_id: domain::todo::TodoId },
     #[error("could not read interactive input: {0}")]
@@ -70,7 +78,12 @@ impl AppError {
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
             Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => "invalid_input",
             Self::RequiredInput { .. } => "required_input_missing",
-            Self::EventNotFound { .. } => "event_not_found",
+            Self::EventNotFound { .. }
+            | Self::Storage(storage::StorageError::EventNotFound { .. }) => "event_not_found",
+            Self::EventVersionConflict { .. }
+            | Self::Storage(storage::StorageError::EventVersionConflict { .. }) => {
+                "event_version_conflict"
+            }
 
             Self::Input(_) => "input_unavailable",
             Self::Serialization(_) => "serialization_error",
@@ -101,7 +114,9 @@ impl AppError {
             | Self::Storage(storage::StorageError::ParentNotFound { .. })
             | Self::Storage(storage::StorageError::DependencyNotFound { .. }) => 66,
             Self::Config(_) => 78,
-            Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => 75,
+            Self::Storage(storage::StorageError::TodoVersionConflict { .. })
+            | Self::EventVersionConflict { .. }
+            | Self::Storage(storage::StorageError::EventVersionConflict { .. }) => 75,
             Self::Storage(_) => 69,
             Self::Serialization(_) => 70,
         }

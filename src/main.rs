@@ -8,8 +8,8 @@ use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
-    CalendarProjection, EventProjection, EventUseCases, ProjectUseCases, QueryError, TagUseCases,
-    TodoEdit, TodoUseCases,
+    CalendarProjection, EventLifecycleError, EventProjection, EventUseCases, ProjectUseCases,
+    QueryError, TagUseCases, TodoEdit, TodoUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
@@ -154,6 +154,13 @@ enum EventCommand {
         date: NaiveDate,
         #[arg(long)]
         timezone: String,
+    },
+    /// Cancel one live event using its current optimistic-lock version.
+    Cancel {
+        #[arg(long)]
+        event_id: EventId,
+        #[arg(long)]
+        version: i64,
     },
 }
 
@@ -591,6 +598,22 @@ fn query_error(error: QueryError<StorageError>) -> AppError {
     }
 }
 
+fn event_lifecycle_error(error: EventLifecycleError<StorageError>) -> AppError {
+    match error {
+        EventLifecycleError::NotFound { event_id } => AppError::EventNotFound { event_id },
+        EventLifecycleError::VersionConflict {
+            event_id,
+            expected_version,
+            actual_version,
+        } => AppError::EventVersionConflict {
+            event_id,
+            expected_version,
+            actual_version,
+        },
+        EventLifecycleError::Repository(error) => AppError::Storage(error),
+    }
+}
+
 async fn run_calendar_command(
     args: &CalendarArgs,
     database: config::ConnectionSettings,
@@ -635,6 +658,13 @@ async fn run_event_command(
     } else {
         None
     };
+    if let EventCommand::Cancel { version, .. } = &args.command {
+        if *version < 1 {
+            return Err(AppError::InvalidInput(
+                "event version must be at least 1".to_owned(),
+            ));
+        }
+    }
     let app = EventUseCases::new(PostgresCalendarEventRepository::new(database));
     match &args.command {
         EventCommand::Create(_) => {
@@ -663,6 +693,13 @@ async fn run_event_command(
             app.day_agenda_async(*date, timezone)
                 .await
                 .map_err(query_error)?,
+        ),
+        EventCommand::Cancel { event_id, version } => print_projection(
+            json,
+            "event.cancel",
+            app.cancel_event_async(*event_id, *version)
+                .await
+                .map_err(event_lifecycle_error)?,
         ),
     }
 }

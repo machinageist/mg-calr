@@ -53,6 +53,11 @@ pub trait AsyncCalendarEventRepository {
         &self,
         calendar_id: Option<CalendarId>,
     ) -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+    fn cancel_event(
+        &self,
+        id: EventId,
+        expected_version: i64,
+    ) -> RepositoryFuture<'_, Event, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
     fn day_agenda(
@@ -223,6 +228,31 @@ pub enum QueryError<E: std::error::Error + 'static> {
     Domain(#[from] crate::domain::todo::TodoError),
 }
 
+#[derive(Debug, Error)]
+pub enum EventLifecycleError<E: std::error::Error + 'static> {
+    #[error("event {event_id} was not found")]
+    NotFound { event_id: EventId },
+    #[error(
+        "event {event_id} version conflict: expected {expected_version}, actual {actual_version}"
+    )]
+    VersionConflict {
+        event_id: EventId,
+        expected_version: i64,
+        actual_version: i64,
+    },
+    #[error("repository operation failed: {0}")]
+    Repository(E),
+}
+
+/// Map repository lifecycle failures to stable application outcomes.
+pub trait EventLifecycleErrorMapping: std::error::Error + Sized + 'static {
+    fn map_event_lifecycle_error(
+        self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> EventLifecycleError<Self>;
+}
+
 /// Stable project query projection consumed by both human and JSON renderers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectProjection {
@@ -290,6 +320,8 @@ pub struct EventProjection {
     pub calendar_id: CalendarId,
     pub title: String,
     pub time: EventTime,
+    pub version: i64,
+    pub cancelled: bool,
 }
 
 impl From<Event> for EventProjection {
@@ -299,6 +331,8 @@ impl From<Event> for EventProjection {
             calendar_id: event.calendar_id,
             title: event.title,
             time: event.time,
+            version: event.version,
+            cancelled: event.deleted_at.is_some(),
         }
     }
 }
@@ -1176,6 +1210,23 @@ where
             .map_err(QueryError::Repository)?;
         items.sort_by(compare_events);
         Ok(items.into_iter().map(EventProjection::from).collect())
+    }
+
+    /// # Errors
+    /// Returns a typed optimistic lifecycle error.
+    pub async fn cancel_event_async(
+        &self,
+        event_id: EventId,
+        expected_version: i64,
+    ) -> Result<EventProjection, EventLifecycleError<R::Error>>
+    where
+        R::Error: EventLifecycleErrorMapping,
+    {
+        self.repository
+            .cancel_event(event_id, expected_version)
+            .await
+            .map(EventProjection::from)
+            .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))
     }
 
     /// # Errors

@@ -39,6 +39,8 @@ pub enum DomainError {
     InvalidAllDayRange,
     #[error("RFC UID must be stable and contain no whitespace")]
     InvalidRfcUid,
+    #[error("event version must be at least 1")]
+    InvalidEventVersion,
 }
 
 macro_rules! domain_id {
@@ -320,6 +322,7 @@ pub struct Event {
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub remote_tombstoned_at: Option<DateTime<Utc>>,
+    pub version: i64,
 }
 
 impl Event {
@@ -346,6 +349,7 @@ impl Event {
             updated_at: now,
             deleted_at: None,
             remote_tombstoned_at: None,
+            version: 1,
         })
     }
 
@@ -365,7 +369,11 @@ impl Event {
         updated_at: DateTime<Utc>,
         deleted_at: Option<DateTime<Utc>>,
         remote_tombstoned_at: Option<DateTime<Utc>>,
+        version: i64,
     ) -> Result<Self, DomainError> {
+        if version < 1 {
+            return Err(DomainError::InvalidEventVersion);
+        }
         Ok(Self {
             id,
             calendar_id,
@@ -377,6 +385,7 @@ impl Event {
             updated_at,
             deleted_at,
             remote_tombstoned_at,
+            version,
         })
     }
 }

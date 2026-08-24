@@ -59,6 +59,27 @@ fn repository_preserves_standard_event_fields_in_storage_contract() {
 }
 
 #[test]
+fn event_cancel_contract_is_parameterized_and_version_guarded() {
+    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+
+    assert!(source.contains("pub async fn cancel_event"));
+    assert!(source.contains("SELECT version, deleted_at FROM events WHERE id = $1 FOR UPDATE"));
+    assert!(source.contains("UPDATE events SET deleted_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("version = version + 1"));
+    assert!(source.contains("AND deleted_at IS NULL AND version = $2"));
+    assert!(source.contains("EventVersionConflict"));
+    assert!(source.contains("EventNotFound"));
+    let cancelled_check = source
+        .find("if row.get::<_, Option<DateTime<Utc>>>(1).is_some()")
+        .expect("cancel checks deleted events");
+    let version_check = source
+        .find("if actual_version != expected_version")
+        .expect("cancel checks optimistic version");
+    assert!(cancelled_check < version_check);
+    assert!(!source.contains("format!(\"UPDATE events"));
+}
+
+#[test]
 fn todo_complete_contract_is_parameterized_and_version_guarded() {
     let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
 
@@ -109,7 +130,7 @@ fn todo_trash_and_restore_contracts_are_atomic_and_legacy_safe() {
     assert!(source.contains("(trashed_at IS NOT NULL OR deleted_at IS NOT NULL) AND version = $2"));
     assert!(source.contains("SELECT version, trashed_at, deleted_at FROM todos WHERE id = $1"));
     assert!(source.contains("COALESCE(trashed_at, deleted_at) AS trashed_at"));
-    assert!(!source.contains("SET deleted_at = CURRENT_TIMESTAMP"));
+    assert!(!source.contains("UPDATE todos SET deleted_at = CURRENT_TIMESTAMP"));
 }
 
 #[test]
