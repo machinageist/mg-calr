@@ -19,6 +19,8 @@ pub enum AppError {
     Domain(#[from] domain::DomainError),
     #[error(transparent)]
     Todo(#[from] domain::todo::TodoError),
+    #[error(transparent)]
+    Projection(#[from] interop::ProjectionError),
     #[error("required input is missing: {field}")]
     RequiredInput { field: &'static str },
     #[error("invalid input: {0}")]
@@ -77,6 +79,10 @@ impl AppError {
             Self::Storage(storage::StorageError::ImportInvalid { .. }) => "import_invalid",
             Self::Storage(storage::StorageError::ImportConflict { .. }) => "import_conflict",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
+            Self::Projection(interop::ProjectionError::Json(_))
+            | Self::Projection(interop::ProjectionError::Invalid(_)) => "projection_invalid",
+            Self::Projection(interop::ProjectionError::Read(_)) => "projection_unavailable",
+            Self::Projection(interop::ProjectionError::Write(_)) => "projection_write_failed",
             Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => "invalid_input",
             Self::RequiredInput { .. } => "required_input_missing",
             Self::EventNotFound { .. }
@@ -97,6 +103,8 @@ impl AppError {
             Self::RequiredInput { .. } | Self::Input(_) => 64,
             Self::Domain(_)
             | Self::Todo(_)
+            | Self::Projection(interop::ProjectionError::Json(_))
+            | Self::Projection(interop::ProjectionError::Invalid(_))
             | Self::InvalidInput(_)
             | Self::Storage(storage::StorageError::TagAlreadyExists { .. })
             | Self::Storage(storage::StorageError::TodoHasChildren { .. })
@@ -115,6 +123,8 @@ impl AppError {
             | Self::Storage(storage::StorageError::ParentNotFound { .. })
             | Self::Storage(storage::StorageError::DependencyNotFound { .. }) => 66,
             Self::Config(_) => 78,
+            Self::Projection(interop::ProjectionError::Read(_))
+            | Self::Projection(interop::ProjectionError::Write(_)) => 74,
             Self::Storage(storage::StorageError::TodoVersionConflict { .. })
             | Self::EventVersionConflict { .. }
             | Self::Storage(storage::StorageError::EventVersionConflict { .. }) => 75,

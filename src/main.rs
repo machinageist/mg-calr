@@ -77,6 +77,15 @@ struct InteropArgs {
 enum InteropCommand {
     /// Export calendars, events, projects, tags, todos, and relationships.
     Export,
+    /// Import and validate an immutable mg-todo projection snapshot.
+    ImportTodo {
+        /// JSON envelope exported by mg-todo.
+        #[arg(long)]
+        input: PathBuf,
+        /// Local projection file replaced atomically after validation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1076,9 +1085,39 @@ async fn run_tui(args: &TuiArgs, database: config::ConnectionSettings) -> Result
     Ok(())
 }
 
+fn run_todo_projection_import(
+    cli: &Cli,
+    input: &std::path::Path,
+    store: &std::path::Path,
+) -> Result<(), AppError> {
+    let projection = mg_calr::interop::TodoProjectionSnapshot::load(input)?;
+    let revision = projection.revision();
+    projection.store(store)?;
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "interop_schema": "mg.interop/1",
+                "kind": "todo_projection_import",
+                "ok": true,
+                "revision": revision,
+            })
+        );
+    } else {
+        println!("imported mg-todo projection revision {revision}");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
+    if let Command::Interop(InteropArgs {
+        command: InteropCommand::ImportTodo { input, store },
+    }) = &cli.command
+    {
+        return run_todo_projection_import(cli, input, store);
+    }
     let app_config = config::load(cli.database_url.clone())?;
 
     match &cli.command {
@@ -1158,7 +1197,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
             run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
         Command::Agenda(agenda) => run_agenda_command(agenda, app_config.database, cli.json).await,
-        Command::Interop(interop) => match interop.command {
+        Command::Interop(interop) => match &interop.command {
             InteropCommand::Export => {
                 if !cli.json {
                     return Err(AppError::InvalidInput(
@@ -1169,6 +1208,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 println!("{}", serde_json::to_string(&snapshot)?);
                 Ok(())
             }
+            InteropCommand::ImportTodo { .. } => unreachable!("handled before configuration load"),
         },
         Command::Project(project) => {
             run_project_command(project, app_config.database, cli.json, cli.no_input).await

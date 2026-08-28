@@ -33,6 +33,45 @@ fn event_import_validates_before_database_access_and_hides_file_path() {
 }
 
 #[test]
+fn todo_projection_import_bypasses_database_config_and_hides_store_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("todo-projection.json");
+    let store = temp.path().join("private/projection.json");
+    std::fs::write(
+        &input,
+        r#"{
+          "interop_schema":"mg.interop/1",
+          "kind":"snapshot",
+          "producer":{"app":"mg-todo","app_version":"0.1.0"},
+          "export_id":"mg-todo:snapshot:test",
+          "created_at":"2026-08-24T12:00:00Z",
+          "source_revision":"revision-1",
+          "records":[],
+          "links":[],
+          "provenance":[],
+          "diagnostics":[]
+        }"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("mg-calr")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("DATABASE_URL", "not-a-postgresql-url")
+        .args(["--json", "interop", "import-todo", "--input"])
+        .arg(&input)
+        .arg("--store")
+        .arg(&store)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"kind\":\"todo_projection_import\"",
+        ))
+        .stdout(predicate::str::contains(store.to_string_lossy().as_ref()).not());
+    assert!(store.exists());
+}
+
+#[test]
 fn event_export_help_is_available_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args(["event", "export", "--help"])

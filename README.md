@@ -1,26 +1,38 @@
 # mg-calr
 
-`mg-calr` is a keyboard-first Rust calendar/reminder/todo application for a local Linux workstation. This repository currently contains **only the first deployable foundation slice**: XDG configuration, typed identifiers/errors, PostgreSQL connection and embedded schema migration infrastructure, and stable foundation diagnostics.
+`mg-calr` is a keyboard-first Rust calendar application for a local Linux workstation. PostgreSQL is authoritative for calendars and events. Todo ownership is being extracted to the separate `mg-todo` application; `mg-calr` can validate and atomically store an immutable `mg.interop/1` projection without connecting to the `mg-todo` database.
 
-## Implemented commands
+## Implemented surface
 
-```text
-mg-calr version
-mg-calr config paths
-mg-calr init
-mg-calr doctor
-mg-calr database status
-mg-calr database migrate
-mg-calr tui  # line-oriented keyboard shell: j/k, r, q
+The current incremental implementation includes:
+
+- XDG configuration, stable JSON/error envelopes, PostgreSQL diagnostics, and embedded migrations;
+- calendar creation/listing and timed or all-day event create/list/show/day-agenda/edit/cancel/restore;
+- deterministic combined agenda queries and a bounded line-oriented keyboard shell;
+- legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-todo` migration period;
+- calendar/event JSON interchange and read-only `mg.interop/1` snapshot export;
+- validated `mg-todo` projection import with canonical identity, lifecycle, relationship, graph, revision, freshness-order, bounded-input, and conflict checks; and
+- crash-safe projection replacement using interprocess advisory locking, atomic rename, file sync, and parent-directory sync.
+
+Run `mg-calr --help` and the relevant subcommand help for the complete current command inventory. Add `--json` where machine-readable output is supported. `--no-input`, `--no-color`, and `NO_COLOR` are supported at their documented boundaries.
+
+### Projection import
+
+Projection refresh is explicit and projection-only:
+
+```bash
+mg-calr interop import-todo \
+  --input /path/to/mg-todo-snapshot.json \
+  --store /path/to/mg-calr-todo-projection.json
 ```
 
-Add `--json` for the versioned JSON envelope. `--no-color` and `NO_COLOR` are accepted globally; current foundation human output intentionally emits no ANSI styling. `--database-url URL` overrides `DATABASE_URL`, then TOML configuration. Commands other than `init`, `doctor`, and `database ...` do not connect to PostgreSQL or make network requests.
+The import validates the complete envelope before replacement, rejects stale or conflicting revisions, and never opens an `mg-todo` database connection. Agenda reads are not yet rewired to this projection; the current legacy todo-backed agenda remains only for migration compatibility until extraction-plan slice 8 lands.
 
 ## Configuration
 
 The optional configuration file is `$XDG_CONFIG_HOME/mg-calr/config.toml` (default `~/.config/mg-calr/config.toml`). Data, state, and cache paths resolve independently under their XDG bases. See `config/example.toml`.
 
-The default PostgreSQL connection uses `/run/postgresql`, the current OS user, database `mg_calr`, and peer authentication. `init` diagnoses only: it never runs `sudo`, creates roles/databases, or applies migrations. `database migrate` is the only foundation command that changes database schema.
+The default calendar PostgreSQL connection uses `/run/postgresql`, the current OS user, database `mg_calr`, and peer authentication. `--database-url URL` overrides `DATABASE_URL`, then TOML configuration. `init` diagnoses only: it never runs `sudo`, creates roles/databases, or applies migrations. `database migrate` applies the embedded schema migrations.
 
 An administrator must provision the peer role and database first. Review and adapt these examples rather than running them blindly:
 
@@ -30,14 +42,15 @@ sudo -u postgres createdb --owner "$USER" mg_calr
 mg-calr database migrate  # run unprivileged, not through sudo
 ```
 
-A failure such as `role "<user>" does not exist` means provisioning is incomplete; `doctor`/`status` return a nonzero error with this guidance and do not modify the server.
+A failure such as `role "<user>" does not exist` means provisioning is incomplete; `doctor`/`status` return a nonzero error with guidance and do not modify the server.
 
 ## Development
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo fmt --all -- --check
+TMPDIR=/dev/shm cargo clippy --workspace --all-targets --all-features -- -D warnings
+TMPDIR=/dev/shm cargo test --workspace --all-targets --all-features
+git diff --check
 ```
 
 PostgreSQL integration is opt-in and ignored by default:
@@ -45,13 +58,13 @@ PostgreSQL integration is opt-in and ignored by default:
 ```bash
 MG_CALR_RUN_DATABASE_TESTS=1 \
 MG_CALR_TEST_DATABASE_URL=postgresql:///mg_calr_test \
-cargo test --test postgres_integration -- --ignored
+TMPDIR=/dev/shm cargo test --test postgres_integration -- --ignored
 ```
 
-Use a disposable database whose URL contains `mg_calr_test`; the test applies schema.
+Use a disposable database whose effective database name contains `mg_calr_test`; the test applies schema.
 
-## Not implemented yet
+## Remaining milestone scope
 
-Event/todo CRUD, recurrence behavior, reminders scanning/notifications, audit-backed undo, iCalendar, sync, backup/restore, raw-mode TUI, Quickshell, packaging, and remote integrations are deferred. Schema tables are a migration foundation, not claims that those workflows exist.
+The projection import is an authority-boundary migration slice, not completion of the product roadmap. Event recurrence/exceptions and full event-core lifecycle remain incomplete. Reminder delivery/service actions, search/bulk safety/audit, lossless iCalendar, vdirsyncer/iCloud synchronization, backup/restore, raw-mode TUI, Quickshell integration, and packaging remain open.
 
 No `LICENSE` is included because MIT versus Apache-2.0 remains unresolved.
