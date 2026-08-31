@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use mg_calr::interop::{
     Diagnostic, Lifecycle, Link, Origin, Producer, ProjectionError, Record, Snapshot,
-    TodoProjectionSnapshot,
+    SnapshotCompleteness, TodoProjectionSnapshot,
 };
 use serde_json::json;
 use std::thread;
@@ -19,6 +19,12 @@ fn snapshot() -> Snapshot {
         export_id: "mg-todo:snapshot:fixture".to_owned(),
         created_at: observed_at,
         source_revision: "authoritative-revision-7".to_owned(),
+        producer_revision: 7,
+        completeness: SnapshotCompleteness {
+            complete: true,
+            expected_records: 1,
+            expected_links: 0,
+        },
         records: vec![Record {
             global_id: "mg-todo:todo:todo-1".to_owned(),
             origin: Origin {
@@ -64,11 +70,11 @@ fn snapshot() -> Snapshot {
 #[test]
 fn validates_mg_todo_only_and_preserves_lossless_payload_metadata() {
     let projection = TodoProjectionSnapshot::validate(snapshot()).unwrap();
-    let record = &projection.snapshot.records[0];
+    let record = &projection.snapshot().records[0];
     assert_eq!(record.global_id, "mg-todo:todo:todo-1");
     assert_eq!(record.revision, 7);
     assert_eq!(record.payload["reminders"][0]["minutes_before"], 30);
-    assert_eq!(projection.snapshot.diagnostics[0].code, "fresh");
+    assert_eq!(projection.snapshot().diagnostics[0].code, "fresh");
 }
 
 #[test]
@@ -110,6 +116,7 @@ fn rejects_relationships_with_missing_endpoints() {
         created_at: None,
         provenance: "exported relationship".to_owned(),
     });
+    value.completeness.expected_links = value.links.len();
     assert!(matches!(
         TodoProjectionSnapshot::validate(value),
         Err(ProjectionError::Invalid(message)) if message.contains("endpoint")
@@ -134,6 +141,7 @@ fn rejects_noncanonical_identity_and_relationship_metadata() {
         created_at: None,
         provenance: "fixture".to_owned(),
     });
+    value.completeness.expected_links = value.links.len();
     assert!(
         matches!(TodoProjectionSnapshot::validate(value), Err(ProjectionError::Invalid(message)) if message.contains("created_by"))
     );
@@ -147,16 +155,17 @@ fn rejects_stale_and_conflicting_replacements() {
     projection.store(&path).unwrap();
 
     let mut stale = snapshot();
+    stale.producer_revision = 6;
     stale.created_at = "2026-08-23T12:00:00Z".parse().unwrap();
     stale.records[0].observed_at = stale.created_at;
     assert!(
-        matches!(TodoProjectionSnapshot::validate(stale).unwrap().store(&path), Err(ProjectionError::Invalid(message)) if message.contains("stale"))
+        matches!(TodoProjectionSnapshot::validate(stale).unwrap().store(&path), Err(ProjectionError::Stale(message)) if message.contains("stale"))
     );
 
     let mut conflict = snapshot();
     conflict.records[0].payload["title"] = json!("changed");
     assert!(
-        matches!(TodoProjectionSnapshot::validate(conflict).unwrap().store(&path), Err(ProjectionError::Invalid(message)) if message.contains("conflicting"))
+        matches!(TodoProjectionSnapshot::validate(conflict).unwrap().store(&path), Err(ProjectionError::Conflict(message)) if message.contains("conflicting"))
     );
 }
 
@@ -190,6 +199,7 @@ fn rejects_self_links_and_cycles_in_todo_graphs() {
         created_at: None,
         provenance: "fixture".to_owned(),
     });
+    self_link.completeness.expected_links = self_link.links.len();
     assert!(
         matches!(TodoProjectionSnapshot::validate(self_link), Err(ProjectionError::Invalid(message)) if message.contains("itself"))
     );
@@ -210,6 +220,8 @@ fn rejects_self_links_and_cycles_in_todo_graphs() {
             provenance: "fixture".to_owned(),
         });
     }
+    cycle.completeness.expected_records = cycle.records.len();
+    cycle.completeness.expected_links = cycle.links.len();
     assert!(
         matches!(TodoProjectionSnapshot::validate(cycle), Err(ProjectionError::Invalid(message)) if message.contains("cycle"))
     );
@@ -238,7 +250,7 @@ fn concurrent_store_calls_cannot_stale_overwrite() {
         );
     });
     let stored = TodoProjectionSnapshot::load(&path).unwrap();
-    let title = stored.snapshot.records[0].payload["title"]
+    let title = stored.snapshot().records[0].payload["title"]
         .as_str()
         .unwrap();
     assert!(title == "first" || title == "second");

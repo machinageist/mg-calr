@@ -26,7 +26,7 @@ mg-calr interop import-todo \
   --store /path/to/mg-calr-todo-projection.json
 ```
 
-The import validates the complete envelope before replacement, rejects stale or conflicting revisions, and never opens an `mg-todo` database connection. Agenda reads are not yet rewired to this projection; the current legacy todo-backed agenda remains only for migration compatibility until extraction-plan slice 8 lands.
+The import validates the complete envelope before replacement, rejects stale or conflicting revisions, and never opens an `mg-todo` database connection. Combined agenda and TUI reads keep calendar/event authority in the mg-calr PostgreSQL database, but read todos only from the validated stored projection. By default they load `$XDG_DATA_HOME/mg-calr/todo-projection.json` (or `~/.local/share/mg-calr/todo-projection.json`); `--todo-projection FILE` selects an explicit imported store. Missing, stale, conflicting, and invalid projections fail closed with distinct diagnostics rather than falling back to legacy todo tables. The existing mg-calr todo schema and commands remain in place for migration compatibility, but they are no longer an agenda read authority.
 
 ## Configuration
 

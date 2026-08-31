@@ -616,6 +616,7 @@ dependencies = [
  "fs2",
  "libc",
  "predicates",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

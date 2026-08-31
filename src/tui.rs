@@ -105,6 +105,23 @@ impl TuiState {
             "mg-calr | agenda {}..{}",
             agenda.start, agenda.end_exclusive
         );
+        if let Some(metadata) = &agenda.todo_projection {
+            let age = chrono::Utc::now()
+                .signed_duration_since(metadata.created_at)
+                .num_seconds()
+                .max(0);
+            let _ = writeln!(
+                frame,
+                "projection {}@{} rev={} source={} content={} age={}s complete={}",
+                metadata.producer,
+                metadata.producer_version,
+                metadata.producer_revision,
+                metadata.source_revision,
+                metadata.content_revision,
+                age,
+                metadata.completeness.complete
+            );
+        }
         frame.push_str("────────────────────────────────────────\n");
         if agenda.items.is_empty() {
             frame.push_str("  (no agenda items)\n");
@@ -200,6 +217,7 @@ mod tests {
         let agenda = AgendaOutput {
             start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            todo_projection: None,
             items: Vec::new(),
         };
         let frame = TuiState::new().render(&agenda);
@@ -216,6 +234,7 @@ mod tests {
         let agenda = AgendaOutput {
             start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            todo_projection: None,
             items: vec![AgendaItem {
                 kind: AgendaKind::Todo,
                 id: "todo-1".to_owned(),

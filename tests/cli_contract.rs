@@ -46,6 +46,8 @@ fn todo_projection_import_bypasses_database_config_and_hides_store_path() {
           "export_id":"mg-todo:snapshot:test",
           "created_at":"2026-08-24T12:00:00Z",
           "source_revision":"revision-1",
+          "producer_revision":1,
+          "completeness":{"complete":true,"expected_records":0,"expected_links":0},
           "records":[],
           "links":[],
           "provenance":[],
@@ -161,12 +163,65 @@ fn agenda_help_exposes_explicit_window_timezone_and_lifecycle_flags() {
         .args(["agenda", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("--todo-projection"))
         .stdout(predicate::str::contains("--start"))
         .stdout(predicate::str::contains("--end"))
         .stdout(predicate::str::contains("--timezone"))
         .stdout(predicate::str::contains("--include-completed"))
         .stdout(predicate::str::contains("--include-trashed"))
         .stdout(predicate::str::contains("--include-blocked"));
+}
+
+#[test]
+fn agenda_reports_missing_projection_before_calendar_database_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing-projection.json");
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--json",
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "agenda",
+            "--todo-projection",
+        ])
+        .arg(&missing)
+        .args([
+            "--start",
+            "2026-08-24",
+            "--end",
+            "2026-08-25",
+            "--timezone",
+            "UTC",
+        ])
+        .assert()
+        .failure()
+        .code(74)
+        .stderr(predicate::str::contains("\"code\":\"projection_missing\""))
+        .stderr(predicate::str::contains(missing.to_string_lossy().as_ref()).not());
+
+    cargo_bin_cmd!("mg-calr")
+        .args([
+            "--database-url",
+            "postgresql://127.0.0.1:1/mg_calr",
+            "agenda",
+            "--todo-projection",
+        ])
+        .arg(&missing)
+        .args([
+            "--start",
+            "2026-08-24",
+            "--end",
+            "2026-08-25",
+            "--timezone",
+            "UTC",
+        ])
+        .assert()
+        .failure()
+        .code(74)
+        .stderr(predicate::eq(
+            "mg-calr: the imported mg-todo projection is missing\n",
+        ))
+        .stderr(predicate::str::contains(missing.to_string_lossy().as_ref()).not());
 }
 
 #[test]

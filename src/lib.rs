@@ -3,6 +3,7 @@ pub mod application;
 pub mod config;
 pub mod domain;
 pub mod interop;
+pub mod notify;
 pub mod storage;
 pub mod tui;
 
@@ -79,6 +80,10 @@ impl AppError {
             Self::Storage(storage::StorageError::ImportInvalid { .. }) => "import_invalid",
             Self::Storage(storage::StorageError::ImportConflict { .. }) => "import_conflict",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
+            Self::Projection(interop::ProjectionError::Missing) => "projection_missing",
+            Self::Projection(interop::ProjectionError::Stale(_)) => "projection_stale",
+            Self::Projection(interop::ProjectionError::Conflict(_)) => "projection_conflict",
+            Self::Projection(interop::ProjectionError::Incomplete(_)) => "projection_incomplete",
             Self::Projection(interop::ProjectionError::Json(_))
             | Self::Projection(interop::ProjectionError::Invalid(_)) => "projection_invalid",
             Self::Projection(interop::ProjectionError::Read(_)) => "projection_unavailable",
@@ -103,6 +108,9 @@ impl AppError {
             Self::RequiredInput { .. } | Self::Input(_) => 64,
             Self::Domain(_)
             | Self::Todo(_)
+            | Self::Projection(interop::ProjectionError::Stale(_))
+            | Self::Projection(interop::ProjectionError::Conflict(_))
+            | Self::Projection(interop::ProjectionError::Incomplete(_))
             | Self::Projection(interop::ProjectionError::Json(_))
             | Self::Projection(interop::ProjectionError::Invalid(_))
             | Self::InvalidInput(_)
@@ -123,7 +131,8 @@ impl AppError {
             | Self::Storage(storage::StorageError::ParentNotFound { .. })
             | Self::Storage(storage::StorageError::DependencyNotFound { .. }) => 66,
             Self::Config(_) => 78,
-            Self::Projection(interop::ProjectionError::Read(_))
+            Self::Projection(interop::ProjectionError::Missing)
+            | Self::Projection(interop::ProjectionError::Read(_))
             | Self::Projection(interop::ProjectionError::Write(_)) => 74,
             Self::Storage(storage::StorageError::TodoVersionConflict { .. })
             | Self::EventVersionConflict { .. }

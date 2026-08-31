@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod reminder;
 pub mod todo;
 pub use todo::{Project, ProjectId, TodoId};
 

@@ -1,10 +1,11 @@
 use mg_calr::storage::{
-    FOUNDATION_MIGRATION, MIGRATIONS, TODO_CORE_MIGRATION, TODO_RECURRENCE_MIGRATION,
+    FOUNDATION_MIGRATION, MIGRATIONS, REMINDER_DELIVERY_LEDGER_MIGRATION,
+    REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION, TODO_RECURRENCE_MIGRATION,
 };
 
 #[test]
 fn foundation_migration_is_embedded_and_covers_only_foundation_entities() {
-    assert_eq!(MIGRATIONS.len(), 5);
+    assert_eq!(MIGRATIONS.len(), 7);
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[0].sql, FOUNDATION_MIGRATION);
 
@@ -43,12 +44,15 @@ fn todo_core_migration_owns_project_schema_without_rewriting_history() {
 }
 
 #[test]
-fn recurrence_migration_is_parameterized_foundation_and_non_destructive() {
+fn recurrence_history_is_preserved_and_append_only_repair_converts_legacy_text_json() {
     assert_eq!(MIGRATIONS[2].version, 3);
     assert_eq!(MIGRATIONS[2].sql, TODO_RECURRENCE_MIGRATION);
-    assert!(TODO_RECURRENCE_MIGRATION.contains("recurrence_rule jsonb"));
-    assert!(TODO_RECURRENCE_MIGRATION.contains("todos_recurrence_rule_check"));
-    assert!(!TODO_RECURRENCE_MIGRATION.contains("DROP TABLE"));
+    assert_eq!(MIGRATIONS[5].version, 6);
+    assert_eq!(MIGRATIONS[5].sql, REPAIR_TODO_RECURRENCE_MIGRATION);
+    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("ALTER COLUMN recurrence_rule TYPE jsonb"));
+    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("recurrence_rule::jsonb"));
+    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("todos_recurrence_rule_check"));
+    assert!(!REPAIR_TODO_RECURRENCE_MIGRATION.contains("DROP TABLE"));
 }
 
 #[test]
@@ -64,4 +68,27 @@ fn reminder_migration_bridges_delivery_identity_without_external_transport() {
     assert!(sql.contains("duplicate.id <> canonical.keeper_id"));
     assert!(mg_calr::storage::FOUNDATION_MIGRATION.contains("UNIQUE (reminder_id, scheduled_for)"));
     assert!(!sql.to_ascii_lowercase().contains("notify"));
+}
+
+#[test]
+fn reminder_delivery_ledger_is_append_only_and_claim_keyed() {
+    assert_eq!(MIGRATIONS[6].version, 7);
+    assert_eq!(MIGRATIONS[6].name, "reminder_delivery_ledger");
+    assert_eq!(MIGRATIONS[6].sql, REMINDER_DELIVERY_LEDGER_MIGRATION);
+    for contract in [
+        "reminder_deliveries_claim_key",
+        "schedule_ref",
+        "occurrence_key",
+        "claim_fence",
+        "ON DELETE SET NULL",
+        "backfilled_before_delivery_existed",
+        "reminder_digests",
+        "reminder_dnd_windows",
+        "reminder_scanner_runs",
+    ] {
+        assert!(REMINDER_DELIVERY_LEDGER_MIGRATION.contains(contract));
+    }
+    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DROP TABLE"));
+    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DELETE FROM"));
+    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("transport"));
 }

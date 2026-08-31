@@ -1,17 +1,21 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use chrono::{DateTime, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
 use crate::application::{
-    AsyncAgendaRepository, EventEdit, EventLifecycleError, EventLifecycleErrorMapping,
-    ReminderDelivery, TodoEdit,
+    AgendaTodoSnapshot, AsyncAgendaRepository, EventEdit, EventLifecycleError,
+    EventLifecycleErrorMapping, ReminderDelivery, TodoEdit,
 };
 use crate::config::ConnectionSettings;
 use crate::domain::{
@@ -27,6 +31,10 @@ pub const TODO_CORE_MIGRATION: &str = include_str!("../migrations/0002_todo_core
 pub const TODO_RECURRENCE_MIGRATION: &str = include_str!("../migrations/0003_todo_recurrence.sql");
 pub const TODO_REMINDERS_MIGRATION: &str = include_str!("../migrations/0004_todo_reminders.sql");
 pub const EVENT_LIFECYCLE_MIGRATION: &str = include_str!("../migrations/0005_event_lifecycle.sql");
+pub const REPAIR_TODO_RECURRENCE_MIGRATION: &str =
+    include_str!("../migrations/0006_repair_todo_recurrence.sql");
+pub const REMINDER_DELIVERY_LEDGER_MIGRATION: &str =
+    include_str!("../migrations/0007_reminder_delivery_ledger.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -60,6 +68,16 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "event_lifecycle",
         sql: EVENT_LIFECYCLE_MIGRATION,
+    },
+    Migration {
+        version: 6,
+        name: "repair_todo_recurrence",
+        sql: REPAIR_TODO_RECURRENCE_MIGRATION,
+    },
+    Migration {
+        version: 7,
+        name: "reminder_delivery_ledger",
+        sql: REMINDER_DELIVERY_LEDGER_MIGRATION,
     },
 ];
 
@@ -555,13 +573,19 @@ async fn connect(
     Ok((client, task))
 }
 
+fn migration_checksum(sql: &str) -> String {
+    format!("{:x}", Sha256::digest(sql.as_bytes()))
+}
+
 async fn ensure_migration_table(client: &Client) -> Result<(), StorageError> {
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS mg_calr_schema_migrations (\
              version bigint PRIMARY KEY, \
              name text NOT NULL, \
-             applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+             checksum text, \
+             applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP); \
+             ALTER TABLE mg_calr_schema_migrations ADD COLUMN IF NOT EXISTS checksum text",
         )
         .await
         .map_err(StorageError::Query)
@@ -597,27 +621,41 @@ pub async fn migration_status(
     }
     let rows = client
         .query(
-            "SELECT version, name FROM mg_calr_schema_migrations ORDER BY version",
+            "SELECT version, name, to_jsonb(migration)->>'checksum' \
+             FROM mg_calr_schema_migrations migration ORDER BY version",
             &[],
         )
         .await
         .map_err(StorageError::Query)?;
     let applied = rows
         .into_iter()
-        .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)))
+        .map(|row| {
+            (
+                row.get::<_, i64>(0),
+                (row.get::<_, String>(1), row.get::<_, Option<String>>(2)),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
 
     MIGRATIONS
         .iter()
         .map(|migration| {
-            if let Some(actual) = applied.get(&migration.version)
-                && actual != migration.name
-            {
-                return Err(StorageError::MigrationDrift {
-                    version: migration.version,
-                    actual: actual.clone(),
-                    expected: migration.name,
-                });
+            if let Some((actual_name, actual_checksum)) = applied.get(&migration.version) {
+                let expected_checksum = migration_checksum(migration.sql);
+                if actual_name != migration.name
+                    || actual_checksum
+                        .as_ref()
+                        .is_some_and(|actual| actual != &expected_checksum)
+                {
+                    return Err(StorageError::MigrationDrift {
+                        version: migration.version,
+                        actual: format!(
+                            "{actual_name}@{}",
+                            actual_checksum.as_deref().unwrap_or("unchecksummed")
+                        ),
+                        expected: migration.name,
+                    });
+                }
             }
             Ok(MigrationState {
                 version: migration.version,
@@ -644,23 +682,60 @@ pub async fn migrate(settings: &ConnectionSettings) -> Result<Vec<MigrationState
         .map_err(StorageError::Query)?;
 
     for migration in MIGRATIONS {
+        let expected_checksum = migration_checksum(migration.sql);
         let existing = transaction
             .query_opt(
-                "SELECT name FROM mg_calr_schema_migrations WHERE version = $1",
+                "SELECT name, checksum FROM mg_calr_schema_migrations WHERE version = $1",
                 &[&migration.version],
             )
             .await
             .map_err(StorageError::Query)?;
         if let Some(row) = existing {
             let actual = row.get::<_, String>(0);
-            if actual != migration.name {
+            let checksum = row.get::<_, Option<String>>(1);
+            if actual != migration.name
+                || checksum
+                    .as_ref()
+                    .is_some_and(|value| value != &expected_checksum)
+            {
                 return Err(StorageError::MigrationDrift {
                     version: migration.version,
                     actual,
                     expected: migration.name,
                 });
             }
+            if checksum.is_none() {
+                transaction
+                    .execute(
+                        "UPDATE mg_calr_schema_migrations SET checksum = $2 WHERE version = $1 AND checksum IS NULL",
+                        &[&migration.version, &expected_checksum],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?;
+            }
             continue;
+        }
+        // The immutable v1 migration created `todos.recurrence_rule` as text,
+        // while immutable v3 used `ADD COLUMN IF NOT EXISTS ... jsonb` before
+        // adding jsonb constraints. Prepare that exact historical transition
+        // transactionally without rewriting either checksummed migration.
+        if migration.version == 3 {
+            let recurrence_type = transaction
+                .query_opt(
+                    "SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'todos' AND column_name = 'recurrence_rule'",
+                    &[],
+                )
+                .await
+                .map_err(StorageError::Query)?
+                .map(|row| row.get::<_, String>(0));
+            if recurrence_type.as_deref() == Some("text") {
+                transaction
+                    .batch_execute(
+                        "ALTER TABLE todos ALTER COLUMN recurrence_rule TYPE jsonb USING CASE WHEN recurrence_rule IS NULL THEN NULL ELSE recurrence_rule::jsonb END",
+                    )
+                    .await
+                    .map_err(StorageError::Query)?;
+            }
         }
         transaction
             .batch_execute(migration.sql)
@@ -668,8 +743,8 @@ pub async fn migrate(settings: &ConnectionSettings) -> Result<Vec<MigrationState
             .map_err(StorageError::Query)?;
         transaction
             .execute(
-                "INSERT INTO mg_calr_schema_migrations (version, name) VALUES ($1, $2)",
-                &[&migration.version, &migration.name],
+                "INSERT INTO mg_calr_schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
+                &[&migration.version, &migration.name, &expected_checksum],
             )
             .await
             .map_err(StorageError::Query)?;
@@ -1820,6 +1895,7 @@ impl PostgresTodoRepository {
     }
 
     /// Record due todo reminders once. No notification transport is invoked.
+    #[allow(clippy::too_many_lines)]
     pub async fn scan_reminders(
         &self,
         at: DateTime<Utc>,
@@ -1893,16 +1969,35 @@ impl PostgresTodoRepository {
                     &[&Uuid::now_v7(), &todo_id.as_uuid(), &(i64::from(minutes_before) * 60), &repeatable],
                 ).await.map_err(StorageError::Query)?.get(0),
             };
-            let delivery = if dry_run {
-                transaction.query_opt(
-                    "SELECT id FROM reminder_deliveries WHERE reminder_id = $1 AND scheduled_for = $2",
-                    &[&reminder_id, &scheduled_for],
-                ).await.map_err(StorageError::Query)?.is_some()
+            let schedule_ref = format!("mg-calr:reminder:{reminder_id}");
+            let status = if dry_run {
+                let exists = transaction
+                    .query_opt(
+                        "SELECT id FROM reminder_deliveries WHERE schedule_ref = $1 AND occurrence_key = 'singleton' AND scheduled_for = $2 AND channel = 'null'",
+                        &[&schedule_ref, &scheduled_for],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?
+                    .is_some();
+                if exists {
+                    "already_recorded"
+                } else {
+                    "would_record"
+                }
             } else {
-                transaction.query_opt(
-                    "INSERT INTO reminder_deliveries (id, reminder_id, scheduled_for) VALUES ($1, $2, $3) ON CONFLICT (reminder_id, scheduled_for) DO NOTHING RETURNING id",
-                    &[&Uuid::now_v7(), &reminder_id, &scheduled_for],
-                ).await.map_err(StorageError::Query)?.is_some()
+                let inserted = transaction
+                    .query_opt(
+                        "INSERT INTO reminder_deliveries (id, reminder_id, scheduled_for, schedule_ref, occurrence_key, channel, state) VALUES ($1, $2, $3, $4, 'singleton', 'null', 'pending') ON CONFLICT (schedule_ref, occurrence_key, scheduled_for, channel) DO NOTHING RETURNING id",
+                        &[&Uuid::now_v7(), &reminder_id, &scheduled_for, &schedule_ref],
+                    )
+                    .await
+                    .map_err(StorageError::Query)?
+                    .is_some();
+                if inserted {
+                    "recorded"
+                } else {
+                    "already_recorded"
+                }
             };
             output.push(ReminderDelivery {
                 todo_id,
@@ -1910,15 +2005,8 @@ impl PostgresTodoRepository {
                 minutes_before,
                 repeatable,
                 scheduled_for,
-                status: if delivery {
-                    "already_recorded"
-                } else if dry_run {
-                    "would_record"
-                } else {
-                    "recorded"
-                }
-                .to_owned(),
-                transport: "none",
+                status: status.to_owned(),
+                channel: "null",
             });
         }
         if dry_run {
@@ -2204,21 +2292,57 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
     }
 }
 
-impl AsyncAgendaRepository for (PostgresCalendarEventRepository, PostgresTodoRepository) {
-    type Error = StorageError;
+/// Read-only agenda boundary that keeps events in PostgreSQL and todos in the
+/// validated immutable mg-todo projection.
+pub struct ProjectionAgendaRepository {
+    events: PostgresCalendarEventRepository,
+    todo_projection: PathBuf,
+}
+
+impl ProjectionAgendaRepository {
+    pub fn new(events: PostgresCalendarEventRepository, todo_projection: PathBuf) -> Self {
+        Self {
+            events,
+            todo_projection,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AgendaRepositoryError {
+    #[error("calendar repository operation failed")]
+    Calendar(#[source] StorageError),
+    #[error(transparent)]
+    TodoProjection(#[from] crate::interop::ProjectionError),
+}
+
+impl AsyncAgendaRepository for ProjectionAgendaRepository {
+    type Error = AgendaRepositoryError;
 
     fn agenda_events(
         &self,
         include_trashed: bool,
     ) -> crate::application::RepositoryFuture<'_, Vec<Event>, Self::Error> {
-        Box::pin(async move { self.0.list_events_with_trashed(None, include_trashed).await })
+        Box::pin(async move {
+            self.events
+                .list_events_with_trashed(None, include_trashed)
+                .await
+                .map_err(AgendaRepositoryError::Calendar)
+        })
     }
 
     fn agenda_todos(
         &self,
         include_trashed: bool,
-    ) -> crate::application::RepositoryFuture<'_, Vec<Todo>, Self::Error> {
-        Box::pin(async move { self.1.list_todos_with_trashed(include_trashed).await })
+    ) -> crate::application::RepositoryFuture<'_, AgendaTodoSnapshot, Self::Error> {
+        Box::pin(async move {
+            let projection = crate::interop::TodoProjectionSnapshot::load(&self.todo_projection)?;
+            let mut snapshot = projection.agenda_todos()?;
+            if !include_trashed {
+                snapshot.todos.retain(|todo| todo.trashed_at.is_none());
+            }
+            Ok(snapshot)
+        })
     }
 }
 

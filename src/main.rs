@@ -16,8 +16,8 @@ use mg_calr::domain::todo::ProjectId;
 use mg_calr::domain::todo::{Priority, TagId, TodoDue, TodoId};
 use mg_calr::domain::{CalendarId, EventId, EventTime};
 use mg_calr::storage::{
-    self, MigrationState, PostgresCalendarEventRepository, PostgresProjectRepository,
-    PostgresTodoRepository, StorageError,
+    self, AgendaRepositoryError, MigrationState, PostgresCalendarEventRepository,
+    PostgresProjectRepository, PostgresTodoRepository, ProjectionAgendaRepository, StorageError,
 };
 use mg_calr::tui::TuiState;
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
@@ -91,6 +91,9 @@ enum InteropCommand {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct AgendaArgs {
+    /// Imported mg-todo projection; defaults under the mg-calr XDG data directory.
+    #[arg(long, value_name = "FILE")]
+    todo_projection: Option<PathBuf>,
     /// Inclusive first civil date in the query window.
     #[arg(long)]
     start: NaiveDate,
@@ -113,6 +116,9 @@ struct AgendaArgs {
 
 #[derive(Debug, Args)]
 struct TuiArgs {
+    /// Imported mg-todo projection; defaults under the mg-calr XDG data directory.
+    #[arg(long, value_name = "FILE")]
+    todo_projection: Option<PathBuf>,
     /// Inclusive first civil date; defaults to today in UTC.
     #[arg(long)]
     start: Option<NaiveDate>,
@@ -700,6 +706,24 @@ fn query_error(error: QueryError<StorageError>) -> AppError {
     }
 }
 
+fn agenda_query_error(error: QueryError<AgendaRepositoryError>) -> AppError {
+    match error {
+        QueryError::InvalidTimezone { .. } | QueryError::InvalidDayBoundary { .. } => {
+            AppError::InvalidInput(error.to_string())
+        }
+        QueryError::Repository(AgendaRepositoryError::Calendar(error)) => AppError::Storage(error),
+        QueryError::Repository(AgendaRepositoryError::TodoProjection(error)) => {
+            AppError::Projection(error)
+        }
+        QueryError::Domain(error) => AppError::Todo(error),
+        QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
+        QueryError::TodoNotFound { todo_id } => AppError::TodoNotFound { todo_id },
+        QueryError::ProjectNotFound { project_id } => {
+            AppError::InvalidInput(format!("project {project_id} was not found"))
+        }
+    }
+}
+
 fn event_lifecycle_error(error: EventLifecycleError<StorageError>) -> AppError {
     match error {
         EventLifecycleError::NotFound { event_id } => AppError::EventNotFound { event_id },
@@ -992,6 +1016,7 @@ async fn run_todo_command(
 async fn run_agenda_command(
     args: &AgendaArgs,
     database: config::ConnectionSettings,
+    default_projection: PathBuf,
     json: bool,
 ) -> Result<(), AppError> {
     let mut query = AgendaQuery::try_new(args.start, args.end, args.timezone.clone())
@@ -1005,13 +1030,13 @@ async fn run_agenda_command(
     query.include_trashed = args.include_trashed;
     query.include_blocked = args.include_blocked;
 
-    let output = AgendaUseCases::new((
+    let output = AgendaUseCases::new(ProjectionAgendaRepository::new(
         PostgresCalendarEventRepository::new(database.clone()),
-        PostgresTodoRepository::new(database),
+        args.todo_projection.clone().unwrap_or(default_projection),
     ))
     .query_async(query)
     .await
-    .map_err(query_error)?;
+    .map_err(agenda_query_error)?;
     print_agenda(json, output)
 }
 
@@ -1022,6 +1047,22 @@ fn print_agenda(json: bool, output: AgendaOutput) -> Result<(), AppError> {
             serde_json::to_string(&Envelope::success("agenda", output))?
         );
     } else {
+        if let Some(metadata) = &output.todo_projection {
+            let age = Utc::now()
+                .signed_duration_since(metadata.created_at)
+                .num_seconds()
+                .max(0);
+            println!(
+                "projection\tproducer={}@{} producer_revision={} source_revision={} content_revision={} age={}s complete={}",
+                metadata.producer,
+                metadata.producer_version,
+                metadata.producer_revision,
+                metadata.source_revision,
+                metadata.content_revision,
+                age,
+                metadata.completeness.complete
+            );
+        }
         for item in &output.items {
             println!("{}", format_agenda_item(item));
         }
@@ -1044,7 +1085,11 @@ fn format_agenda_item(item: &AgendaItem) -> String {
     )
 }
 
-async fn run_tui(args: &TuiArgs, database: config::ConnectionSettings) -> Result<(), AppError> {
+async fn run_tui(
+    args: &TuiArgs,
+    database: config::ConnectionSettings,
+    default_projection: PathBuf,
+) -> Result<(), AppError> {
     let start = args.start.unwrap_or_else(|| Utc::now().date_naive());
     let end = args.end.unwrap_or_else(|| start + chrono::Days::new(1));
     if start >= end {
@@ -1052,16 +1097,17 @@ async fn run_tui(args: &TuiArgs, database: config::ConnectionSettings) -> Result
             "tui --start must be before --end (end is exclusive)".to_owned(),
         ));
     }
+    let todo_projection = args.todo_projection.clone().unwrap_or(default_projection);
     let load = || async {
         let query =
             AgendaQuery::try_new(start, end, args.timezone.clone()).map_err(AppError::from)?;
-        AgendaUseCases::new((
+        AgendaUseCases::new(ProjectionAgendaRepository::new(
             PostgresCalendarEventRepository::new(database.clone()),
-            PostgresTodoRepository::new(database.clone()),
+            todo_projection.clone(),
         ))
         .query_async(query)
         .await
-        .map_err(query_error)
+        .map_err(agenda_query_error)
     };
     let mut agenda = load().await?;
     let mut state = TuiState::new();
@@ -1119,6 +1165,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         return run_todo_projection_import(cli, input, store);
     }
     let app_config = config::load(cli.database_url.clone())?;
+    let default_todo_projection = app_config.paths.data_dir.join("todo-projection.json");
 
     match &cli.command {
         Command::Version => print_debug(
@@ -1196,7 +1243,15 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         Command::Todo(todo) => {
             run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
-        Command::Agenda(agenda) => run_agenda_command(agenda, app_config.database, cli.json).await,
+        Command::Agenda(agenda) => {
+            run_agenda_command(
+                agenda,
+                app_config.database,
+                default_todo_projection,
+                cli.json,
+            )
+            .await
+        }
         Command::Interop(interop) => match &interop.command {
             InteropCommand::Export => {
                 if !cli.json {
@@ -1233,7 +1288,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                 ),
             }
         }
-        Command::Tui(args) => run_tui(args, app_config.database).await,
+        Command::Tui(args) => run_tui(args, app_config.database, default_todo_projection).await,
     }
 }
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,14 +7,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::application::{
+    AgendaTodoSnapshot, ProjectionCompleteness, ProjectionDiagnostic, TodoProjectionMetadata,
+};
 use crate::config::ConnectionSettings;
+use crate::domain::todo::{ProjectId, TagId, Todo, TodoId};
 use crate::storage::{StorageError, export_snapshot_sources};
 
 const INTEROP_SCHEMA: &str = "mg.interop/1";
@@ -23,16 +25,26 @@ const TODO_PRODUCER_APP: &str = "mg-todo";
 const MAX_PROJECTION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROJECTION_RECORDS: usize = 100_000;
 const MAX_PROJECTION_LINKS: usize = 500_000;
+const MAX_AGENDA_PROJECTION_AGE: TimeDelta = TimeDelta::hours(24);
+const MAX_IMPORT_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 
 /// A validated, immutable mg-todo snapshot held by mg-calr.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoProjectionSnapshot {
-    pub snapshot: Snapshot,
+    snapshot: Snapshot,
 }
 
 /// Errors returned before any projection file is replaced.
 #[derive(Debug, Error)]
 pub enum ProjectionError {
+    #[error("the imported mg-todo projection is missing")]
+    Missing,
+    #[error("stale mg-todo projection: {0}")]
+    Stale(String),
+    #[error("conflicting mg-todo projection: {0}")]
+    Conflict(String),
+    #[error("incomplete mg-todo projection: {0}")]
+    Incomplete(String),
     #[error("could not read projection snapshot: {0}")]
     Read(#[source] std::io::Error),
     #[error("could not write projection snapshot: {0}")]
@@ -44,6 +56,234 @@ pub enum ProjectionError {
 }
 
 impl TodoProjectionSnapshot {
+    /// Rehydrate agenda todo rows from the validated projection payload and links.
+    ///
+    /// # Errors
+    /// Returns an explicit stale or conflict diagnostic when duplicated projection
+    /// metadata disagrees, or an invalid diagnostic when a todo payload cannot be used.
+    #[allow(clippy::too_many_lines)]
+    pub fn agenda_todos(&self) -> Result<AgendaTodoSnapshot, ProjectionError> {
+        self.agenda_todos_at(Utc::now())
+    }
+
+    /// Rehydrate agenda rows using an injected clock for deterministic policy tests.
+    ///
+    /// # Errors
+    /// Returns a typed projection error if freshness, completeness, payload, or
+    /// relationship evidence is invalid.
+    #[allow(clippy::too_many_lines)]
+    pub fn agenda_todos_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<AgendaTodoSnapshot, ProjectionError> {
+        // Defense in depth if this type is ever made internally mutable.
+        Self::validate(self.snapshot.clone())?;
+        if self.snapshot.created_at > now {
+            return Err(ProjectionError::Invalid(
+                "projection created_at is in the future".to_owned(),
+            ));
+        }
+        if now - self.snapshot.created_at > MAX_AGENDA_PROJECTION_AGE {
+            return Err(ProjectionError::Stale(
+                "projection is older than the 24-hour agenda freshness limit".to_owned(),
+            ));
+        }
+        let degraded = self
+            .snapshot
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.severity != "info");
+        if let Some(diagnostic) = degraded {
+            return Err(ProjectionError::Incomplete(format!(
+                "producer diagnostic {} reports {} coverage",
+                diagnostic.code, diagnostic.severity
+            )));
+        }
+        let mut todos = Vec::new();
+        let mut agenda_visible = Vec::new();
+        let mut todo_indexes = HashMap::new();
+        for record in self
+            .snapshot
+            .records
+            .iter()
+            .filter(|record| record.origin.kind == "todo")
+        {
+            let todo: Todo = serde_json::from_value(record.payload.clone()).map_err(|error| {
+                ProjectionError::Invalid(format!(
+                    "todo payload for {} is invalid: {error}",
+                    record.global_id
+                ))
+            })?;
+            if record.origin.local_id != todo.id.to_string() {
+                return Err(ProjectionError::Conflict(format!(
+                    "todo payload identity disagrees with {}",
+                    record.global_id
+                )));
+            }
+            if record.revision != todo.version {
+                return Err(ProjectionError::Stale(format!(
+                    "record and payload revision disagree for {}",
+                    record.global_id
+                )));
+            }
+            if record.observed_at != todo.updated_at {
+                return Err(ProjectionError::Stale(format!(
+                    "record observation and payload update disagree for {}",
+                    record.global_id
+                )));
+            }
+            if record.lifecycle.trashed_at != todo.trashed_at {
+                return Err(ProjectionError::Conflict(format!(
+                    "record lifecycle and payload disagree for {}",
+                    record.global_id
+                )));
+            }
+            let visible = match record.lifecycle.state.as_str() {
+                "active" | "trashed" => true,
+                "deleted" | "tombstoned" => false,
+                state => {
+                    return Err(ProjectionError::Conflict(format!(
+                        "todo {} has unsupported agenda lifecycle {state}",
+                        record.global_id
+                    )));
+                }
+            };
+            let todo = todo.rehydrate().map_err(|error| {
+                ProjectionError::Invalid(format!(
+                    "todo payload for {} failed domain validation: {error}",
+                    record.global_id
+                ))
+            })?;
+            todo_indexes.insert(record.global_id.as_str(), todos.len());
+            todos.push(todo);
+            agenda_visible.push(visible);
+        }
+
+        let mut projected_parents: HashMap<usize, TodoId> = HashMap::new();
+        let mut projected_projects: HashMap<usize, ProjectId> = HashMap::new();
+        let mut projected_dependencies: HashMap<usize, Vec<TodoId>> = HashMap::new();
+        let mut projected_tags: HashMap<usize, Vec<TagId>> = HashMap::new();
+        for link in &self.snapshot.links {
+            match link.relation.as_str() {
+                "todo_parent" => {
+                    let child = todo_index(&todo_indexes, &link.target_global_id)?;
+                    let parent = todo_id_from_global(&link.source_global_id)?;
+                    if projected_parents.insert(child, parent).is_some() {
+                        return Err(ProjectionError::Conflict(format!(
+                            "multiple parent relationships target {}",
+                            link.target_global_id
+                        )));
+                    }
+                }
+                "todo_depends_on" => {
+                    let dependent = todo_index(&todo_indexes, &link.source_global_id)?;
+                    projected_dependencies
+                        .entry(dependent)
+                        .or_default()
+                        .push(todo_id_from_global(&link.target_global_id)?);
+                }
+                "project_contains_todo" => {
+                    let todo = todo_index(&todo_indexes, &link.target_global_id)?;
+                    let project = link
+                        .source_global_id
+                        .strip_prefix("mg-todo:project:")
+                        .ok_or_else(|| relationship_conflict(link))?
+                        .parse::<ProjectId>()
+                        .map_err(|_| relationship_conflict(link))?;
+                    if projected_projects.insert(todo, project).is_some() {
+                        return Err(ProjectionError::Conflict(format!(
+                            "multiple project relationships target {}",
+                            link.target_global_id
+                        )));
+                    }
+                }
+                "todo_tagged" => {
+                    let todo = todo_index(&todo_indexes, &link.source_global_id)?;
+                    let tag = link
+                        .target_global_id
+                        .strip_prefix("mg-todo:tag:")
+                        .ok_or_else(|| relationship_conflict(link))?
+                        .parse::<TagId>()
+                        .map_err(|_| relationship_conflict(link))?;
+                    projected_tags.entry(todo).or_default().push(tag);
+                }
+                _ => {}
+            }
+        }
+
+        for (index, todo) in todos.iter_mut().enumerate() {
+            let parent = projected_parents.remove(&index);
+            let project = projected_projects.remove(&index);
+            let mut dependencies = projected_dependencies.remove(&index).unwrap_or_default();
+            let mut tags = projected_tags.remove(&index).unwrap_or_default();
+            dependencies.sort_by_key(ToString::to_string);
+            tags.sort_by_key(ToString::to_string);
+            let mut payload_dependencies = todo.dependency_ids.clone();
+            let mut payload_tags = todo.tag_ids.clone();
+            payload_dependencies.sort_by_key(ToString::to_string);
+            payload_tags.sort_by_key(ToString::to_string);
+            if todo.parent_id != parent
+                || todo.project_id != project
+                || payload_dependencies != dependencies
+                || payload_tags != tags
+            {
+                return Err(ProjectionError::Conflict(format!(
+                    "payload and relationship projection disagree for mg-todo:todo:{}",
+                    todo.id
+                )));
+            }
+            todo.dependency_ids = dependencies;
+            todo.tag_ids = tags;
+        }
+        let todos = todos
+            .into_iter()
+            .zip(agenda_visible)
+            .filter_map(|(todo, visible)| visible.then_some(todo))
+            .collect();
+        Ok(AgendaTodoSnapshot {
+            todos,
+            metadata: self.metadata(),
+        })
+    }
+
+    /// Borrow the immutable validated source envelope.
+    #[must_use]
+    pub const fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    fn metadata(&self) -> TodoProjectionMetadata {
+        TodoProjectionMetadata {
+            producer: self.snapshot.producer.app.clone(),
+            producer_version: self.snapshot.producer.app_version.clone(),
+            producer_revision: self.snapshot.producer_revision,
+            source_revision: self.snapshot.source_revision.clone(),
+            content_revision: self.revision(),
+            created_at: self.snapshot.created_at,
+            completeness: ProjectionCompleteness {
+                complete: self.snapshot.completeness.complete,
+                record_count: self.snapshot.records.len(),
+                todo_count: self
+                    .snapshot
+                    .records
+                    .iter()
+                    .filter(|record| record.origin.kind == "todo")
+                    .count(),
+                link_count: self.snapshot.links.len(),
+                diagnostics: self
+                    .snapshot
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| ProjectionDiagnostic {
+                        severity: diagnostic.severity.clone(),
+                        code: diagnostic.code.clone(),
+                        message: diagnostic.message.clone(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     /// Parse and validate an mg-todo envelope without database access.
     ///
     /// # Errors
@@ -73,6 +313,19 @@ impl TodoProjectionSnapshot {
         if snapshot.kind != "snapshot" || snapshot.producer.app != TODO_PRODUCER_APP {
             return Err(ProjectionError::Invalid(
                 "expected an mg-todo snapshot producer".to_owned(),
+            ));
+        }
+        if snapshot.producer_revision == 0 {
+            return Err(ProjectionError::Invalid(
+                "producer_revision must be positive".to_owned(),
+            ));
+        }
+        if !snapshot.completeness.complete
+            || snapshot.completeness.expected_records != snapshot.records.len()
+            || snapshot.completeness.expected_links != snapshot.links.len()
+        {
+            return Err(ProjectionError::Incomplete(
+                "complete-snapshot marker and expected counts must match the envelope".to_owned(),
             ));
         }
         if snapshot.records.len() > MAX_PROJECTION_RECORDS
@@ -197,25 +450,53 @@ impl TodoProjectionSnapshot {
     /// Panics only if a validated snapshot cannot be serialized, which would indicate a
     /// programming error in the contract types.
     pub fn store(&self, path: &Path) -> Result<(), ProjectionError> {
-        let bytes = serde_json::to_vec_pretty(&self.snapshot).expect("snapshot is serializable");
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent).map_err(ProjectionError::Write)?;
-        reject_symlink(parent).map_err(ProjectionError::Write)?;
-        if path_entry_exists(path).map_err(ProjectionError::Write)? {
-            reject_symlink(path).map_err(ProjectionError::Write)?;
+        self.store_at(path, Utc::now())
+    }
+
+    /// Store with an injected clock for deterministic import-policy tests.
+    ///
+    /// # Errors
+    /// Returns an error before replacement for future, stale, conflicting,
+    /// incomplete, disappearing, or unsafe filesystem state.
+    #[allow(clippy::too_many_lines)]
+    pub fn store_at(&self, path: &Path, now: DateTime<Utc>) -> Result<(), ProjectionError> {
+        if self.snapshot.created_at > now + MAX_IMPORT_CLOCK_SKEW {
+            return Err(ProjectionError::Invalid(
+                "projection created_at exceeds the five-minute import clock-skew limit".to_owned(),
+            ));
         }
-        let _lock = ProjectionLock::acquire(path).map_err(ProjectionError::Write)?;
-        if path_entry_exists(path).map_err(ProjectionError::Write)? {
-            let existing = Self::load(path)?;
-            if self.snapshot.created_at < existing.snapshot.created_at {
-                return Err(ProjectionError::Invalid(
-                    "stale projection snapshot would roll back created_at".to_owned(),
+        let bytes = serde_json::to_vec_pretty(&self.snapshot).map_err(|error| {
+            ProjectionError::Invalid(format!("projection serialization failed: {error}"))
+        })?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path.file_name().ok_or_else(|| {
+            ProjectionError::Write(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "projection path must name a file",
+            ))
+        })?;
+        let directory =
+            SecureProjectionDirectory::open(parent, true).map_err(ProjectionError::Write)?;
+        let _lock =
+            ProjectionLock::acquire_at(&directory, filename).map_err(ProjectionError::Write)?;
+        if directory
+            .entry_exists(filename)
+            .map_err(ProjectionError::Write)?
+        {
+            let existing = Self::load_file(
+                directory
+                    .open_read(filename)
+                    .map_err(ProjectionError::Read)?,
+            )?;
+            if self.snapshot.producer_revision < existing.snapshot.producer_revision {
+                return Err(ProjectionError::Stale(
+                    "stale projection snapshot would roll back producer_revision".to_owned(),
                 ));
             }
-            if self.snapshot.created_at == existing.snapshot.created_at
+            if self.snapshot.producer_revision == existing.snapshot.producer_revision
                 && self.revision() != existing.revision()
             {
-                return Err(ProjectionError::Invalid(
+                return Err(ProjectionError::Conflict(
                     "conflicting projection revisions at the same created_at".to_owned(),
                 ));
             }
@@ -225,40 +506,66 @@ impl TodoProjectionSnapshot {
                 .iter()
                 .map(|record| (record.global_id.as_str(), record))
                 .collect();
+            let new_ids: HashSet<_> = self
+                .snapshot
+                .records
+                .iter()
+                .map(|record| record.global_id.as_str())
+                .collect();
+            if let Some(disappeared) = existing
+                .snapshot
+                .records
+                .iter()
+                .find(|record| !new_ids.contains(record.global_id.as_str()))
+            {
+                return Err(ProjectionError::Incomplete(format!(
+                    "record {} disappeared without a retained tombstone",
+                    disappeared.global_id
+                )));
+            }
             for record in &self.snapshot.records {
                 if let Some(old) = old_records.get(record.global_id.as_str()) {
                     if record.revision < old.revision {
-                        return Err(ProjectionError::Invalid(format!(
+                        return Err(ProjectionError::Stale(format!(
                             "stale record revision for {}",
                             record.global_id
                         )));
                     }
-                    if record.revision == old.revision
-                        && serde_json::to_vec(record).expect("record is serializable")
-                            != serde_json::to_vec(old).expect("record is serializable")
-                    {
-                        return Err(ProjectionError::Invalid(format!(
-                            "conflicting record revision for {}",
-                            record.global_id
-                        )));
+                    if record.revision == old.revision {
+                        let record_bytes = serde_json::to_vec(record).map_err(|error| {
+                            ProjectionError::Invalid(format!(
+                                "projection record serialization failed: {error}"
+                            ))
+                        })?;
+                        let old_bytes = serde_json::to_vec(old).map_err(|error| {
+                            ProjectionError::Invalid(format!(
+                                "stored projection record serialization failed: {error}"
+                            ))
+                        })?;
+                        if record_bytes != old_bytes {
+                            return Err(ProjectionError::Conflict(format!(
+                                "conflicting record revision for {}",
+                                record.global_id
+                            )));
+                        }
                     }
                 }
             }
         }
-        let temporary = unique_temp_path(path);
+        let temporary = unique_temp_name(filename);
         let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options.open(&temporary).map_err(ProjectionError::Write)?;
+            let mut file = directory
+                .create_new(&temporary)
+                .map_err(ProjectionError::Write)?;
             file.write_all(&bytes).map_err(ProjectionError::Write)?;
             file.sync_all().map_err(ProjectionError::Write)?;
-            std::fs::rename(&temporary, path).map_err(ProjectionError::Write)?;
-            sync_parent_directory(parent).map_err(ProjectionError::Write)
+            directory
+                .rename(&temporary, filename)
+                .map_err(ProjectionError::Write)?;
+            directory.sync().map_err(ProjectionError::Write)
         })();
         if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+            let _ = directory.remove(&temporary);
         }
         result
     }
@@ -268,11 +575,26 @@ impl TodoProjectionSnapshot {
     /// # Errors
     /// Returns an error when the file cannot be read, parsed, or validated.
     pub fn load(path: &Path) -> Result<Self, ProjectionError> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW);
-        let file = options.open(path).map_err(ProjectionError::Read)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path.file_name().ok_or_else(|| {
+            ProjectionError::Read(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "projection path must name a file",
+            ))
+        })?;
+        let directory =
+            SecureProjectionDirectory::open(parent, false).map_err(ProjectionError::Read)?;
+        let file = directory.open_read(filename).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ProjectionError::Missing
+            } else {
+                ProjectionError::Read(error)
+            }
+        })?;
+        Self::load_file(file)
+    }
+
+    fn load_file(file: std::fs::File) -> Result<Self, ProjectionError> {
         let metadata = file.metadata().map_err(ProjectionError::Read)?;
         if metadata.len() > MAX_PROJECTION_BYTES {
             return Err(ProjectionError::Invalid(format!(
@@ -297,6 +619,37 @@ impl TodoProjectionSnapshot {
     }
 }
 
+fn todo_index(indexes: &HashMap<&str, usize>, global_id: &str) -> Result<usize, ProjectionError> {
+    indexes.get(global_id).copied().ok_or_else(|| {
+        ProjectionError::Conflict(format!(
+            "relationship references unavailable agenda todo {global_id}"
+        ))
+    })
+}
+
+fn todo_id_from_global(global_id: &str) -> Result<TodoId, ProjectionError> {
+    global_id
+        .strip_prefix("mg-todo:todo:")
+        .ok_or_else(|| {
+            ProjectionError::Conflict(format!(
+                "relationship endpoint is not an mg-todo todo: {global_id}"
+            ))
+        })?
+        .parse::<TodoId>()
+        .map_err(|_| {
+            ProjectionError::Conflict(format!(
+                "relationship endpoint has an invalid todo identity: {global_id}"
+            ))
+        })
+}
+
+fn relationship_conflict(link: &Link) -> ProjectionError {
+    ProjectionError::Conflict(format!(
+        "relationship {} has an invalid agenda identity",
+        link.link_id
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -306,10 +659,21 @@ pub struct Snapshot {
     pub export_id: String,
     pub created_at: DateTime<Utc>,
     pub source_revision: String,
+    /// Producer-defined, monotonically increasing complete-snapshot sequence.
+    pub producer_revision: u64,
+    /// Evidence that the producer emitted the complete authority set.
+    pub completeness: SnapshotCompleteness,
     pub records: Vec<Record>,
     pub links: Vec<Link>,
     pub provenance: Vec<Provenance>,
     pub diagnostics: Vec<Diagnostic>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotCompleteness {
+    pub complete: bool,
+    pub expected_records: usize,
+    pub expected_links: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -560,6 +924,12 @@ pub async fn export_snapshot(settings: &ConnectionSettings) -> Result<Snapshot, 
         export_id: format!("{PRODUCER_APP}:snapshot:{digest}"),
         created_at,
         source_revision: digest,
+        producer_revision: 1,
+        completeness: SnapshotCompleteness {
+            complete: true,
+            expected_records: records.len(),
+            expected_links: links.len(),
+        },
         records,
         links,
         provenance,
@@ -679,6 +1049,114 @@ fn has_cycle<'a>(edges: impl Iterator<Item = (&'a str, &'a str)>) -> bool {
     visited != node_count
 }
 
+struct SecureProjectionDirectory {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl SecureProjectionDirectory {
+    fn open(path: &Path, create: bool) -> Result<Self, std::io::Error> {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        use std::path::Component;
+
+        let anchor = if path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
+        let mut directory = OpenOptions::new().read(true).open(anchor)?;
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                if matches!(component, Component::RootDir | Component::CurDir) {
+                    continue;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "projection path may not contain parent traversal",
+                ));
+            };
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let opened = openat(&directory, name, flags, Mode::empty()).or_else(|error| {
+                if create && error == rustix::io::Errno::NOENT {
+                    match mkdirat(&directory, name, Mode::RWXU) {
+                        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                        Err(error) => return Err(error),
+                    }
+                    openat(&directory, name, flags, Mode::empty())
+                } else {
+                    Err(error)
+                }
+            });
+            directory = std::fs::File::from(opened.map_err(io_error)?);
+        }
+        Ok(Self { file: directory })
+    }
+
+    fn open_with(
+        &self,
+        name: &std::ffi::OsStr,
+        flags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+    ) -> Result<std::fs::File, std::io::Error> {
+        rustix::fs::openat(
+            &self.file,
+            name,
+            flags | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            mode,
+        )
+        .map(std::fs::File::from)
+        .map_err(io_error)
+    }
+
+    fn open_read(&self, name: &std::ffi::OsStr) -> Result<std::fs::File, std::io::Error> {
+        let file = self.open_with(name, rustix::fs::OFlags::RDONLY, rustix::fs::Mode::empty())?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "projection target must be a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
+    fn create_new(&self, name: &std::ffi::OsStr) -> Result<std::fs::File, std::io::Error> {
+        self.open_with(
+            name,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+    }
+
+    fn entry_exists(&self, name: &std::ffi::OsStr) -> Result<bool, std::io::Error> {
+        match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() => Ok(true),
+            Ok(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "projection target must be a regular file and not a symbolic link",
+            )),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    fn rename(&self, old: &std::ffi::OsStr, new: &std::ffi::OsStr) -> Result<(), std::io::Error> {
+        rustix::fs::renameat(&self.file, old, &self.file, new).map_err(io_error)
+    }
+
+    fn remove(&self, name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
+        rustix::fs::unlinkat(&self.file, name, rustix::fs::AtFlags::empty()).map_err(io_error)
+    }
+
+    fn sync(&self) -> Result<(), std::io::Error> {
+        self.file.sync_all()
+    }
+}
+
+#[cfg(unix)]
+fn io_error(error: rustix::io::Errno) -> std::io::Error {
+    std::io::Error::from_raw_os_error(error.raw_os_error())
+}
+
 struct ProjectionLock {
     // The kernel releases this advisory lock when the process or descriptor exits.
     // The lock file remains in place so contenders always lock the same inode.
@@ -686,19 +1164,17 @@ struct ProjectionLock {
 }
 
 impl ProjectionLock {
-    fn acquire(path: &Path) -> Result<Self, std::io::Error> {
-        let lock_path = path.with_file_name(format!(
-            ".{}.lock",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("projection")
-        ));
+    fn acquire_at(
+        directory: &SecureProjectionDirectory,
+        filename: &std::ffi::OsStr,
+    ) -> Result<Self, std::io::Error> {
+        let lock_name = std::ffi::OsString::from(format!(".{}.lock", filename.to_string_lossy()));
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        let file = options.open(&lock_path)?;
+        let file = directory.open_with(
+            &lock_name,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
         loop {
             match FileExt::try_lock_exclusive(&file) {
                 Ok(()) => return Ok(Self { file }),
@@ -723,46 +1199,15 @@ impl Drop for ProjectionLock {
     }
 }
 
-fn reject_symlink(path: &Path) -> Result<(), std::io::Error> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "projection paths must not be symbolic links",
-        ));
-    }
-    Ok(())
-}
-
-fn path_entry_exists(path: &Path) -> Result<bool, std::io::Error> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-// Persist the directory entry after rename where the platform supports directory fsync.
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
-    OpenOptions::new().read(true).open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> Result<(), std::io::Error> {
-    // Windows does not expose a portable directory fsync through std; the file is durable.
-    Ok(())
-}
-
-fn unique_temp_path(path: &Path) -> PathBuf {
+fn unique_temp_name(filename: &std::ffi::OsStr) -> std::ffi::OsString {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("projection.json");
-    path.with_file_name(format!(".{filename}.tmp-{}-{nonce}", std::process::id()))
+    std::ffi::OsString::from(format!(
+        ".{}.tmp-{}-{nonce}",
+        filename.to_string_lossy(),
+        std::process::id()
+    ))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -810,10 +1255,11 @@ mod lock_tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("projection.json");
         let lock_path = path.with_file_name(".projection.json.lock");
-        let first = ProjectionLock::acquire(&path).unwrap();
+        let secure = SecureProjectionDirectory::open(directory.path(), false).unwrap();
+        let first = ProjectionLock::acquire_at(&secure, path.file_name().unwrap()).unwrap();
         assert!(lock_path.exists());
         drop(first);
-        let second = ProjectionLock::acquire(&path).unwrap();
+        let second = ProjectionLock::acquire_at(&secure, path.file_name().unwrap()).unwrap();
         assert!(lock_path.exists());
         drop(second);
     }
@@ -822,7 +1268,8 @@ mod lock_tests {
     fn never_reclaims_lock_owned_by_live_process() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("projection.json");
-        let lock = ProjectionLock::acquire(&path).unwrap();
+        let secure = SecureProjectionDirectory::open(directory.path(), false).unwrap();
+        let lock = ProjectionLock::acquire_at(&secure, path.file_name().unwrap()).unwrap();
         let contender = OpenOptions::new()
             .read(true)
             .write(true)

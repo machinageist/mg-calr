@@ -170,7 +170,10 @@ pub trait AsyncAgendaRepository {
     -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn agenda_todos(&self, include_trashed: bool) -> RepositoryFuture<'_, Vec<Todo>, Self::Error>;
+    fn agenda_todos(
+        &self,
+        include_trashed: bool,
+    ) -> RepositoryFuture<'_, AgendaTodoSnapshot, Self::Error>;
 }
 
 /// Asynchronous persistence boundary for project metadata.
@@ -420,6 +423,43 @@ pub enum AgendaKind {
     Todo,
 }
 
+/// Producer diagnostic retained on every projection-backed agenda response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// Truthful coverage facts for the validated projection content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionCompleteness {
+    pub complete: bool,
+    pub record_count: usize,
+    pub todo_count: usize,
+    pub link_count: usize,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+/// Immutable projection identity attached to combined agenda output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TodoProjectionMetadata {
+    pub producer: String,
+    pub producer_version: String,
+    pub producer_revision: u64,
+    pub source_revision: String,
+    pub content_revision: String,
+    pub created_at: DateTime<chrono::Utc>,
+    pub completeness: ProjectionCompleteness,
+}
+
+/// Projection-backed todo rows and the exact envelope that authorized them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgendaTodoSnapshot {
+    pub todos: Vec<Todo>,
+    pub metadata: TodoProjectionMetadata,
+}
+
 /// A normalized, stable row in a combined agenda result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgendaItem {
@@ -485,6 +525,7 @@ impl AgendaQuery {
 pub struct AgendaOutput {
     pub start: NaiveDate,
     pub end_exclusive: NaiveDate,
+    pub todo_projection: Option<TodoProjectionMetadata>,
     pub items: Vec<AgendaItem>,
 }
 
@@ -496,6 +537,25 @@ impl AgendaOutput {
         query: AgendaQuery,
         events: Vec<Event>,
         todos: Vec<Todo>,
+    ) -> Result<Self, QueryError<Infallible>> {
+        Self::from_sources(&query, events, todos, None)
+    }
+
+    /// Build an agenda while retaining the immutable todo projection identity.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn from_projection(
+        query: AgendaQuery,
+        events: Vec<Event>,
+        todos: AgendaTodoSnapshot,
+    ) -> Result<Self, QueryError<Infallible>> {
+        Self::from_sources(&query, events, todos.todos, Some(todos.metadata))
+    }
+
+    fn from_sources(
+        query: &AgendaQuery,
+        events: Vec<Event>,
+        todos: Vec<Todo>,
+        todo_projection: Option<TodoProjectionMetadata>,
     ) -> Result<Self, QueryError<Infallible>> {
         if query.start >= query.end_exclusive {
             return Err(QueryError::Domain(
@@ -577,6 +637,7 @@ impl AgendaOutput {
         Ok(Self {
             start: query.start,
             end_exclusive: query.end_exclusive,
+            todo_projection,
             items,
         })
     }
@@ -703,7 +764,7 @@ pub struct Reminder {
     pub repeatable: bool,
 }
 
-/// One deterministic result from a reminder delivery scan.
+/// One deterministic result from legacy reminder materialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReminderDelivery {
     pub todo_id: TodoId,
@@ -712,7 +773,7 @@ pub struct ReminderDelivery {
     pub repeatable: bool,
     pub scheduled_for: DateTime<chrono::Utc>,
     pub status: String,
-    pub transport: &'static str,
+    pub channel: &'static str,
 }
 
 impl From<Todo> for TodoQueryProjection {
@@ -1101,16 +1162,19 @@ where
             })?;
         local_day_boundary(zone, query.start, &query.timezone).map_err(map_agenda_error)?;
         local_day_boundary(zone, query.end_exclusive, &query.timezone).map_err(map_agenda_error)?;
-        let (events, todos) = tokio::join!(
-            self.repository.agenda_events(query.include_trashed),
-            self.repository.agenda_todos(query.include_trashed)
-        );
-        AgendaOutput::from_snapshot(
-            query,
-            events.map_err(QueryError::Repository)?,
-            todos.map_err(QueryError::Repository)?,
-        )
-        .map_err(map_agenda_error)
+        // Projection validity is an authority prerequisite. Do not open or await
+        // PostgreSQL when the imported todo snapshot is unusable.
+        let todos = self
+            .repository
+            .agenda_todos(query.include_trashed)
+            .await
+            .map_err(QueryError::Repository)?;
+        let events = self
+            .repository
+            .agenda_events(query.include_trashed)
+            .await
+            .map_err(QueryError::Repository)?;
+        AgendaOutput::from_projection(query, events, todos).map_err(map_agenda_error)
     }
 }
 
