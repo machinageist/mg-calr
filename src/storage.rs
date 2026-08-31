@@ -636,6 +636,9 @@ pub async fn migration_status(
             )
         })
         .collect::<std::collections::HashMap<_, _>>();
+    if let Some(max_version) = applied.keys().max().copied() {
+        verify_live_schema(&client, max_version).await?;
+    }
 
     MIGRATIONS
         .iter()
@@ -664,6 +667,46 @@ pub async fn migration_status(
             })
         })
         .collect()
+}
+
+async fn verify_live_schema(client: &Client, max_version: i64) -> Result<(), StorageError> {
+    const TABLES: &[(i64, &str)] = &[
+        (1, "calendars"),
+        (1, "events"),
+        (1, "todos"),
+        (1, "todo_dependencies"),
+        (1, "reminders"),
+        (1, "reminder_deliveries"),
+        (1, "audit_log"),
+        (2, "projects"),
+        (2, "tags"),
+        (2, "todo_tags"),
+        (4, "todo_reminders"),
+        (7, "reminder_digests"),
+        (7, "reminder_dnd_windows"),
+        (7, "reminder_scanner_runs"),
+    ];
+    for (version, table) in TABLES {
+        if *version > max_version {
+            continue;
+        }
+        let exists = client
+            .query_one(
+                "SELECT to_regclass(current_schema() || '.' || $1) IS NOT NULL",
+                &[table],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .get::<_, bool>(0);
+        if !exists {
+            return Err(StorageError::MigrationDrift {
+                version: max_version,
+                actual: format!("missing live table {table}"),
+                expected: "embedded migration schema",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Apply pending embedded migrations in one advisory-locked transaction.
