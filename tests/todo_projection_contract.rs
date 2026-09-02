@@ -78,6 +78,35 @@ fn validates_mg_todo_only_and_preserves_lossless_payload_metadata() {
 }
 
 #[test]
+fn accepts_the_mg_todo_mvp_neutral_export_unchanged() {
+    let mut source = snapshot();
+    source.records[0].payload = json!({
+        "id": "todo-1",
+        "title": "ship snapshot",
+        "due": null,
+        "recurrence": null,
+        "reminders": [],
+        "priority": "none",
+        "project_id": null,
+        "tag_ids": [],
+        "dependency_ids": [],
+        "notes": null,
+        "parent_id": null,
+        "completed_at": null,
+        "trashed_at": null,
+        "version": 7,
+        "created_at": "2026-08-24T12:00:00Z",
+        "updated_at": "2026-08-24T12:00:00Z"
+    });
+    let json = serde_json::to_string(&source).unwrap();
+    let projection = TodoProjectionSnapshot::parse(&json).unwrap();
+    let record = &projection.snapshot().records[0];
+    assert_eq!(record.payload["title"], "ship snapshot");
+    assert!(record.payload["due"].is_null());
+    assert_eq!(record.payload["reminders"], json!([]));
+}
+
+#[test]
 fn rejects_non_todo_producer_and_does_not_replace_existing_store() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("projection.json");
