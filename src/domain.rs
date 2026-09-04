@@ -559,7 +559,8 @@ pub struct EventMetadata {
     pub status: Option<EventStatus>,
     pub busy: bool,
     pub categories: Vec<String>,
-    pub recurrence_rule: Option<String>,
+    /// The validated repeat rule the agenda expands, if this event repeats.
+    pub recurrence_rule: Option<EventRecurrence>,
     pub alarms: Vec<Alarm>,
     pub organizer: Option<String>,
     pub attendees: Vec<String>,

@@ -1,11 +1,12 @@
 use mg_calr::storage::{
-    FOUNDATION_MIGRATION, MIGRATIONS, REMINDER_DELIVERY_LEDGER_MIGRATION,
-    REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION, TODO_RECURRENCE_MIGRATION,
+    EVENT_RECURRENCE_MIGRATION, FOUNDATION_MIGRATION, MIGRATIONS,
+    REMINDER_DELIVERY_LEDGER_MIGRATION, REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION,
+    TODO_RECURRENCE_MIGRATION,
 };
 
 #[test]
 fn foundation_migration_is_embedded_and_covers_only_foundation_entities() {
-    assert_eq!(MIGRATIONS.len(), 7);
+    assert_eq!(MIGRATIONS.len(), 8);
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[0].sql, FOUNDATION_MIGRATION);
 
@@ -91,4 +92,35 @@ fn reminder_delivery_ledger_is_append_only_and_claim_keyed() {
     assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DROP TABLE"));
     assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DELETE FROM"));
     assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("transport"));
+}
+
+#[test]
+fn event_recurrence_migration_converts_the_unused_text_column_append_only() {
+    let migration = MIGRATIONS
+        .iter()
+        .find(|migration| migration.version == 8)
+        .expect("event recurrence migration is embedded");
+    assert_eq!(migration.name, "event_recurrence");
+    assert_eq!(migration.sql, EVENT_RECURRENCE_MIGRATION);
+
+    // Converted in place rather than dropped, and no schedule is invented
+    assert!(EVENT_RECURRENCE_MIGRATION.contains("ALTER TABLE events"));
+    assert!(EVENT_RECURRENCE_MIGRATION.contains("ALTER COLUMN recurrence_rule TYPE jsonb"));
+    assert!(EVENT_RECURRENCE_MIGRATION.contains("events_recurrence_rule_check"));
+    assert!(!EVENT_RECURRENCE_MIGRATION.contains("DROP TABLE"));
+    assert!(!EVENT_RECURRENCE_MIGRATION.contains("DROP COLUMN"));
+    assert!(!EVENT_RECURRENCE_MIGRATION.contains("INSERT INTO"));
+    assert!(!EVENT_RECURRENCE_MIGRATION.contains("UPDATE events"));
+
+    // The shape check mirrors the one migration 6 established for todos
+    for clause in [
+        "jsonb_typeof(recurrence_rule) = 'object'",
+        "? 'frequency'",
+        "? 'interval'",
+    ] {
+        assert!(
+            EVENT_RECURRENCE_MIGRATION.contains(clause),
+            "missing {clause}"
+        );
+    }
 }

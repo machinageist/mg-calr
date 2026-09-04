@@ -1,6 +1,7 @@
+use chrono::Weekday;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use mg_calr::config::{ConfigSource, ConnectionSettings};
-use mg_calr::domain::{Calendar, CalendarId, Event, EventTime};
+use mg_calr::domain::{Calendar, CalendarId, Event, EventFrequency, EventRecurrence, EventTime};
 use mg_calr::storage::{PostgresCalendarEventRepository, StorageError};
 use tokio_postgres::{Client, NoTls};
 
@@ -87,6 +88,68 @@ async fn migration_is_idempotent_on_disposable_database() {
     assert!(second.iter().all(|migration| migration.applied));
 }
 
+/// A weekly rule with a weekday set, the shape the imported schedules use.
+fn recurring_fixture(calendar_id: CalendarId) -> (Event, EventRecurrence) {
+    let mut event = Event::new(
+        calendar_id,
+        "Recurring fixture",
+        EventTime::timed(
+            instant("2026-09-07T08:00:00-07:00"),
+            instant("2026-09-07T08:15:00-07:00"),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rule = EventRecurrence::new(
+        EventFrequency::Weekly,
+        1,
+        Some(78),
+        None,
+        vec![
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+        ],
+    )
+    .unwrap();
+    event.metadata.recurrence_rule = Some(rule.clone());
+    (event, rule)
+}
+
+/// A rule must survive the jsonb column, and an event without one must stay without one.
+async fn prove_recurrence_round_trip(
+    repository: &PostgresCalendarEventRepository,
+    recurring: mg_calr::domain::EventId,
+    plain: mg_calr::domain::EventId,
+    rule: &EventRecurrence,
+) -> Result<(), StorageError> {
+    let stored = repository.find_event(recurring).await?;
+    if stored
+        .and_then(|event| event.metadata.recurrence_rule)
+        .as_ref()
+        != Some(rule)
+    {
+        return Err(StorageError::InvalidStoredData(
+            "recurrence rule did not round-trip".to_owned(),
+        ));
+    }
+    if repository
+        .find_event(plain)
+        .await?
+        .and_then(|event| event.metadata.recurrence_rule)
+        .is_some()
+    {
+        return Err(StorageError::InvalidStoredData(
+            "a non-recurring event gained a rule".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 async fn exercise_repository(
     repository: &PostgresCalendarEventRepository,
     alpha: &Calendar,
@@ -115,8 +178,12 @@ async fn exercise_repository(
         .unwrap(),
     )
     .unwrap();
+    let (recurring, rule) = recurring_fixture(alpha.id);
+
     repository.save_event(&timed).await?;
     repository.save_event(&all_day).await?;
+    repository.save_event(&recurring).await?;
+    prove_recurrence_round_trip(repository, recurring.id, timed.id, &rule).await?;
 
     let calendars = repository.list_calendars().await?;
     let selected = calendars
@@ -130,7 +197,13 @@ async fn exercise_repository(
         ));
     }
     let events = repository.list_events(Some(alpha.id)).await?;
-    if events.iter().map(|event| event.id).collect::<Vec<_>>() != vec![all_day.id, timed.id] {
+    if events
+        .iter()
+        .map(|event| event.id)
+        .filter(|id| *id != recurring.id)
+        .collect::<Vec<_>>()
+        != vec![all_day.id, timed.id]
+    {
         return Err(StorageError::InvalidStoredData(
             "event ordering contract failed".to_owned(),
         ));

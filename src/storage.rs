@@ -19,7 +19,8 @@ use crate::application::{
 };
 use crate::config::ConnectionSettings;
 use crate::domain::{
-    Calendar, CalendarId, Event, EventId, EventMetadata, EventStatus, EventTime, RfcUid,
+    Calendar, CalendarId, Event, EventId, EventMetadata, EventRecurrence, EventStatus, EventTime,
+    RfcUid,
     todo::{
         Priority, Project, ProjectId, RecurrenceRule, Tag, TagId, Todo, TodoDue, TodoError, TodoId,
         TodoReminder,
@@ -35,6 +36,8 @@ pub const REPAIR_TODO_RECURRENCE_MIGRATION: &str =
     include_str!("../migrations/0006_repair_todo_recurrence.sql");
 pub const REMINDER_DELIVERY_LEDGER_MIGRATION: &str =
     include_str!("../migrations/0007_reminder_delivery_ledger.sql");
+pub const EVENT_RECURRENCE_MIGRATION: &str =
+    include_str!("../migrations/0008_event_recurrence.sql");
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -78,6 +81,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "reminder_delivery_ledger",
         sql: REMINDER_DELIVERY_LEDGER_MIGRATION,
+    },
+    Migration {
+        version: 8,
+        name: "event_recurrence",
+        sql: EVENT_RECURRENCE_MIGRATION,
     },
 ];
 
@@ -894,6 +902,7 @@ impl PostgresCalendarEventRepository {
             } => (None, None, None, Some(*start), Some(*end_exclusive)),
         };
         let status = event.metadata.status.map(event_status);
+        let recurrence = recurrence_value(event.metadata.recurrence_rule.as_ref())?;
         let extension_properties = serde_json::json!({
             "categories": event.metadata.categories,
             "alarms": event.metadata.alarms,
@@ -907,7 +916,7 @@ impl PostgresCalendarEventRepository {
                     &event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(),
                     &event.title, &event.metadata.description, &event.metadata.location,
                     &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at,
-                    &ends_at, &all_day_start, &all_day_end, &event.metadata.recurrence_rule,
+                    &ends_at, &all_day_start, &all_day_end, &recurrence,
                     &extension_properties, &event.created_at, &event.updated_at,
                     &event.deleted_at, &event.remote_tombstoned_at, &event.version,
                 ],
@@ -2666,7 +2675,7 @@ pub async fn import_events(
         });
         tx.execute(
             "INSERT INTO events (id,calendar_id,rfc_uid,title,description,location,url,status,busy,timezone,starts_at,ends_at,all_day_start,all_day_end,recurrence_rule,extension_properties,created_at,updated_at,deleted_at,remote_tombstoned_at,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
-            &[&event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(), &event.title, &event.metadata.description, &event.metadata.location, &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at, &ends_at, &all_day_start, &all_day_end, &event.metadata.recurrence_rule, &extension_properties, &event.created_at, &event.updated_at, &event.deleted_at, &event.remote_tombstoned_at, &event.version],
+            &[&event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(), &event.title, &event.metadata.description, &event.metadata.location, &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at, &ends_at, &all_day_start, &all_day_end, &recurrence_value(event.metadata.recurrence_rule.as_ref())?, &extension_properties, &event.created_at, &event.updated_at, &event.deleted_at, &event.remote_tombstoned_at, &event.version],
         ).await.map_err(StorageError::Query)?;
     }
     tx.commit().await.map_err(StorageError::Query)?;
@@ -2866,6 +2875,33 @@ fn calendar_from_row(row: &Row) -> Result<Calendar, StorageError> {
     .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
 }
 
+/// Encode a validated rule for the jsonb column.
+fn recurrence_value(
+    rule: Option<&EventRecurrence>,
+) -> Result<Option<serde_json::Value>, StorageError> {
+    rule.map(|rule| {
+        rule.validate()
+            .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+        serde_json::to_value(rule)
+            .map_err(|error| StorageError::InvalidStoredData(error.to_string()))
+    })
+    .transpose()
+}
+
+/// Read a stored rule back, revalidating rather than trusting the column.
+fn recurrence_from_row(
+    value: Option<serde_json::Value>,
+) -> Result<Option<EventRecurrence>, StorageError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let rule: EventRecurrence = serde_json::from_value(value)
+        .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+    rule.validate()
+        .map_err(|error| StorageError::InvalidStoredData(error.to_string()))?;
+    Ok(Some(rule))
+}
+
 fn event_from_row(row: &Row) -> Result<Event, StorageError> {
     let id = row.get::<_, Uuid>(0).to_string().parse().map_err(|error| {
         StorageError::InvalidStoredData(format!("invalid event identifier: {error}"))
@@ -2906,7 +2942,7 @@ fn event_from_row(row: &Row) -> Result<Event, StorageError> {
         status: parse_event_status(row.get(7))?,
         busy: row.get(8),
         categories: extension.categories,
-        recurrence_rule: row.get(14),
+        recurrence_rule: recurrence_from_row(row.get(14))?,
         alarms: extension.alarms,
         organizer: extension.organizer,
         attendees: extension.attendees,
