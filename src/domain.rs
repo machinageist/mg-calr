@@ -1,7 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Offset, Utc};
+use chrono::{
+    DateTime, Datelike, Days, FixedOffset, Months, NaiveDate, Offset, TimeZone, Utc, Weekday,
+};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +44,22 @@ pub enum DomainError {
     InvalidRfcUid,
     #[error("event version must be at least 1")]
     InvalidEventVersion,
+    #[error("recurrence interval must be between 1 and 366")]
+    InvalidRecurrenceInterval,
+    #[error("recurrence count must be between 1 and {max}")]
+    InvalidRecurrenceCount { max: u32 },
+    #[error("a recurrence rule must state a count or an until date")]
+    UnboundedRecurrence,
+    #[error("recurrence until must be after the event start")]
+    RecurrenceUntilNotAfterStart,
+    #[error("a weekday set is only meaningful for a weekly recurrence")]
+    WeekdaySetWithoutWeekly,
+    #[error("a weekday set must not be empty or repeat a day")]
+    InvalidWeekdaySet,
+    #[error("recurrence range start must not be after its end")]
+    InvalidRecurrenceRange,
+    #[error("a recurring occurrence has no valid local time in '{timezone}'")]
+    UnrepresentableOccurrence { timezone: String },
 }
 
 macro_rules! domain_id {
@@ -265,6 +283,260 @@ impl EventTime {
         })
     }
 }
+
+/// How often an event repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum EventFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+/// A bounded repeat rule owned by this application.
+///
+/// Deliberately separate from the todo `RecurrenceRule`, which is part of the
+/// `mg-todo` projection contract and cannot state a weekday set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventRecurrence {
+    pub frequency: EventFrequency,
+    pub interval: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<NaiveDate>,
+    /// Weekdays a weekly rule lands on. Empty means the day the event starts on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_weekday: Vec<Weekday>,
+}
+
+impl EventRecurrence {
+    /// Build a validated repeat rule.
+    ///
+    /// # Errors
+    /// Rejects an interval or count outside its bound, a rule with neither a
+    /// count nor an until date, and a weekday set that is empty, repeats a day,
+    /// or is attached to a frequency other than weekly.
+    pub fn new(
+        frequency: EventFrequency,
+        interval: u32,
+        count: Option<u32>,
+        until: Option<NaiveDate>,
+        by_weekday: Vec<Weekday>,
+    ) -> Result<Self, DomainError> {
+        let rule = Self {
+            frequency,
+            interval,
+            count,
+            until,
+            by_weekday,
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    /// # Errors
+    /// Returns the same rejections as [`EventRecurrence::new`].
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if !(1..=MAX_RECURRENCE_INTERVAL).contains(&self.interval) {
+            return Err(DomainError::InvalidRecurrenceInterval);
+        }
+        if let Some(count) = self.count
+            && !(1..=MAX_RECURRENCE_COUNT).contains(&count)
+        {
+            return Err(DomainError::InvalidRecurrenceCount {
+                max: MAX_RECURRENCE_COUNT,
+            });
+        }
+        if self.count.is_none() && self.until.is_none() {
+            return Err(DomainError::UnboundedRecurrence);
+        }
+        if !self.by_weekday.is_empty() {
+            if self.frequency != EventFrequency::Weekly {
+                return Err(DomainError::WeekdaySetWithoutWeekly);
+            }
+            let mut seen = self.by_weekday.clone();
+            seen.sort_by_key(Weekday::num_days_from_monday);
+            seen.dedup();
+            if seen.len() != self.by_weekday.len() {
+                return Err(DomainError::InvalidWeekdaySet);
+            }
+        }
+        Ok(())
+    }
+
+    /// Weekdays this rule lands on, falling back to the day the event starts.
+    fn weekdays(&self, start: NaiveDate) -> Vec<Weekday> {
+        if self.by_weekday.is_empty() {
+            return vec![start.weekday()];
+        }
+        let mut days = self.by_weekday.clone();
+        days.sort_by_key(Weekday::num_days_from_monday);
+        days
+    }
+
+    /// Expand a base time into the occurrences overlapping one civil-date window.
+    ///
+    /// Each occurrence keeps the base event's duration, and a timed occurrence
+    /// keeps its wall time in its own zone, so a daylight-saving transition moves
+    /// the instant rather than the time a person reads.
+    ///
+    /// # Errors
+    /// Rejects an invalid rule, a backwards window, and an occurrence whose local
+    /// time does not exist in its zone.
+    pub fn expand(
+        &self,
+        base: &EventTime,
+        from: NaiveDate,
+        through: NaiveDate,
+    ) -> Result<Vec<(u32, EventTime)>, DomainError> {
+        if from > through {
+            return Err(DomainError::InvalidRecurrenceRange);
+        }
+        self.validate()?;
+        let start = base_start_date(base);
+        if self.until.is_some_and(|until| until < start) {
+            return Err(DomainError::RecurrenceUntilNotAfterStart);
+        }
+        let mut found = Vec::new();
+        for (index, date) in self.occurrence_dates(start).into_iter().enumerate() {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            if index >= MAX_RECURRENCE_STEPS {
+                break;
+            }
+            if date > through || self.until.is_some_and(|until| date > until) {
+                break;
+            }
+            if date >= from {
+                found.push((index, shift_event_time(base, date)?));
+            }
+            if self.count.is_some_and(|count| index + 1 >= count) {
+                break;
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every date this rule lands on, in order, starting at the base date.
+    fn occurrence_dates(&self, start: NaiveDate) -> Vec<NaiveDate> {
+        let mut dates = Vec::new();
+        match self.frequency {
+            EventFrequency::Weekly => {
+                let weekdays = self.weekdays(start);
+                let Some(mut week) = start
+                    .checked_sub_days(Days::new(u64::from(start.weekday().num_days_from_monday())))
+                else {
+                    return dates;
+                };
+                // A weekday set can name days earlier in the starting week than
+                // the event itself; those are not occurrences and take no index.
+                while dates.len() < MAX_RECURRENCE_STEPS as usize {
+                    let before = dates.len();
+                    for weekday in &weekdays {
+                        let Some(date) = week
+                            .checked_add_days(Days::new(u64::from(weekday.num_days_from_monday())))
+                        else {
+                            return dates;
+                        };
+                        if date >= start {
+                            dates.push(date);
+                        }
+                    }
+                    let Some(next) = week.checked_add_days(Days::new(u64::from(self.interval) * 7))
+                    else {
+                        return dates;
+                    };
+                    if next <= week && before == dates.len() {
+                        return dates;
+                    }
+                    week = next;
+                }
+            }
+            EventFrequency::Daily => {
+                let mut date = start;
+                while dates.len() < MAX_RECURRENCE_STEPS as usize {
+                    dates.push(date);
+                    let Some(next) = date.checked_add_days(Days::new(u64::from(self.interval)))
+                    else {
+                        return dates;
+                    };
+                    date = next;
+                }
+            }
+            EventFrequency::Monthly => {
+                let mut step = 0_u32;
+                while dates.len() < MAX_RECURRENCE_STEPS as usize {
+                    let Some(date) = start.checked_add_months(Months::new(self.interval * step))
+                    else {
+                        return dates;
+                    };
+                    dates.push(date);
+                    let Some(next) = step.checked_add(1) else {
+                        return dates;
+                    };
+                    step = next;
+                }
+            }
+        }
+        dates
+    }
+}
+
+/// The civil date an event's own time starts on.
+fn base_start_date(base: &EventTime) -> NaiveDate {
+    match base {
+        EventTime::Timed { start, .. } => start.date_naive(),
+        EventTime::AllDay { start, .. } => *start,
+    }
+}
+
+/// Move one event time onto another date, keeping its duration and wall time.
+fn shift_event_time(base: &EventTime, date: NaiveDate) -> Result<EventTime, DomainError> {
+    match base {
+        EventTime::AllDay {
+            start,
+            end_exclusive,
+        } => {
+            let span = (*end_exclusive - *start).num_days().max(1);
+            let end = date
+                .checked_add_days(Days::new(u64::try_from(span).unwrap_or(1)))
+                .ok_or(DomainError::InvalidAllDayRange)?;
+            EventTime::all_day(date, end)
+        }
+        EventTime::Timed {
+            start,
+            end,
+            timezone,
+        } => {
+            let zone = timezone
+                .parse::<Tz>()
+                .map_err(|_| DomainError::InvalidTimezone {
+                    timezone: timezone.clone(),
+                })?;
+            let duration = *end - *start;
+            let wall = start.with_timezone(&zone).naive_local();
+            let local = date.and_time(wall.time());
+            let shifted = zone.from_local_datetime(&local).single().ok_or_else(|| {
+                DomainError::UnrepresentableOccurrence {
+                    timezone: timezone.clone(),
+                }
+            })?;
+            let occurrence_start = shifted.fixed_offset();
+            let occurrence_end = occurrence_start + duration;
+            EventTime::timed(
+                occurrence_start,
+                occurrence_end.with_timezone(&zone).fixed_offset(),
+                timezone.clone(),
+            )
+        }
+    }
+}
+
+const MAX_RECURRENCE_INTERVAL: u32 = 366;
+const MAX_RECURRENCE_COUNT: u32 = 1000;
+/// Occurrences examined before a rule is treated as runaway, independent of the
+/// window asked for, so a far-future query cannot walk forever.
+const MAX_RECURRENCE_STEPS: u32 = 4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventStatus {
