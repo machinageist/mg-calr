@@ -1,6 +1,6 @@
 # Event recurrence specification
 
-Status: active change specification
+Status: delivered and verified against the live mg_calr database on 2026-09-04
 
 ## Desired outcome
 
@@ -65,6 +65,25 @@ rather than importing a weaker schedule silently.
 7. An RRULE part this rule cannot represent fails the import with the part named.
 8. Focused tests, all targets, strict Clippy, formatting, diff hygiene, and the
    disposable PostgreSQL suite pass.
+
+## Delivered
+
+All four slices are implemented. Both source files were read into 36 stored
+events carrying weekly rules with weekday sets, expanding to 1,248 occurrences
+between Monday 7 September and Saturday 5 December — the counts their RRULEs
+state — with Sundays empty throughout and nothing after the series ends. A
+second import of the same file is refused on its UID.
+
+Ordering was repaired alongside: the agenda sort key carried no time, so a day
+fell in alphabetical order. That was invisible with one event a day and glaring
+with a full schedule.
+
+## Remaining
+
+- Editing or cancelling a single occurrence still cancels the whole series.
+- `EXDATE`, `RDATE` and `RECURRENCE-ID` are unread, so an exception in a source
+  file would be silently absent rather than refused.
+- Nothing writes iCalendar back out.
 
 ## Non-goals
 

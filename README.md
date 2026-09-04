@@ -8,8 +8,13 @@ The current incremental implementation includes:
 
 - XDG configuration, stable JSON/error envelopes, PostgreSQL diagnostics, and embedded migrations;
 - calendar creation/listing and timed or all-day event create/list/show/day-agenda/edit/cancel/restore;
-- deterministic combined agenda queries, rendered as a day whose times are restated
-  in the zone the agenda was asked for, and a bounded line-oriented keyboard shell;
+- deterministic combined agenda queries, rendered as a day ordered by the clock
+  with times restated in the zone the agenda was asked for, and a bounded
+  line-oriented keyboard shell;
+- bounded event recurrence — daily, weekly and monthly, with an optional weekday
+  set — expanded into occurrences at read time rather than stored per day;
+- an iCalendar reader that imports `VEVENT` records and refuses by name any RRULE
+  part this application cannot represent;
 - legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-todo` migration period;
 - calendar/event JSON interchange and read-only `mg.interop/1` snapshot export;
 - validated `mg-todo` projection import with canonical identity, lifecycle, relationship, graph, revision, freshness-order, bounded-input, and conflict checks; and
@@ -70,6 +75,8 @@ Use a disposable database whose effective database name contains `mg_calr_test`;
 
 ## Remaining milestone scope
 
-The projection import is an authority-boundary migration slice, not completion of the product roadmap. Event recurrence/exceptions and full event-core lifecycle remain incomplete. Reminder delivery/service actions, search/bulk safety/audit, lossless iCalendar, vdirsyncer/iCloud synchronization, backup/restore, raw-mode TUI, Quickshell integration, and packaging remain open.
+The projection import is an authority-boundary migration slice, not completion of the product roadmap. Per-occurrence exceptions (`EXDATE`, `RDATE`, `RECURRENCE-ID`) and editing a
+single occurrence of a series remain incomplete, as does full event-core
+lifecycle. Reminder delivery/service actions, search/bulk safety/audit, lossless iCalendar export, vdirsyncer/iCloud synchronization, backup/restore, a raw-mode TUI, and packaging remain open.
 
 No `LICENSE` is included because MIT versus Apache-2.0 remains unresolved.
