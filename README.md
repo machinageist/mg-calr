@@ -8,11 +8,16 @@ The current incremental implementation includes:
 
 - XDG configuration, stable JSON/error envelopes, PostgreSQL diagnostics, and embedded migrations;
 - calendar creation/listing and timed or all-day event create/list/show/day-agenda/edit/cancel/restore;
-- deterministic combined agenda queries and a bounded line-oriented keyboard shell;
+- deterministic combined agenda queries, rendered as a day whose times are restated
+  in the zone the agenda was asked for, and a bounded line-oriented keyboard shell;
 - legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-todo` migration period;
 - calendar/event JSON interchange and read-only `mg.interop/1` snapshot export;
 - validated `mg-todo` projection import with canonical identity, lifecycle, relationship, graph, revision, freshness-order, bounded-input, and conflict checks; and
 - crash-safe projection replacement using interprocess advisory locking, atomic rename, file sync, and parent-directory sync.
+
+Only todos carrying a due value appear on a day agenda, and completed ones are hidden
+unless `--include-completed` is passed. `mg-todo` is the producer of that projection;
+see its README for how a reminder is kept and refreshed into the calendar.
 
 Run `mg-calr --help` and the relevant subcommand help for the complete current command inventory. Add `--json` where machine-readable output is supported. `--no-input`, `--no-color`, and `NO_COLOR` are supported at their documented boundaries.
 

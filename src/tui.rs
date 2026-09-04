@@ -135,8 +135,10 @@ impl TuiState {
                     AgendaKind::Event => "event",
                     AgendaKind::Todo => "todo",
                 };
+                // Index zero is the base due value, not a recurrence a person needs numbered
                 let occurrence = item
                     .occurrence_index
+                    .filter(|index| *index > 0)
                     .map_or_else(String::new, |index| format!(" #{index}"));
                 let when = zone.map_or_else(|| "unscheduled".to_owned(), |zone| item.when(zone));
                 let _ = writeln!(
