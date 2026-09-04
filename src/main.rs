@@ -15,7 +15,7 @@ use mg_calr::application::{
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
 use mg_calr::domain::todo::{Priority, TagId, TodoDue, TodoId};
-use mg_calr::domain::{CalendarId, EventId, EventTime};
+use mg_calr::domain::{CalendarId, Event, EventId, EventTime, RfcUid};
 use mg_calr::storage::{
     self, AgendaRepositoryError, MigrationState, PostgresCalendarEventRepository,
     PostgresProjectRepository, PostgresTodoRepository, ProjectionAgendaRepository, StorageError,
@@ -204,6 +204,13 @@ enum EventCommand {
     },
     /// Export all calendars and events, including lifecycle metadata, as deterministic JSON.
     Export,
+    /// Import VEVENT records from an iCalendar file into one existing calendar.
+    ImportIcs {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        calendar: CalendarId,
+    },
     /// Import a previously exported calendar/event JSON document transactionally.
     Import {
         #[arg(long)]
@@ -692,6 +699,65 @@ fn application_error(error: ApplicationError<StorageError>) -> AppError {
     }
 }
 
+/// Restore a document this application previously exported.
+async fn import_export_document(
+    database: &config::ConnectionSettings,
+    file: &PathBuf,
+    json: bool,
+) -> Result<(), AppError> {
+    let input = std::fs::read_to_string(file).map_err(|_| StorageError::ImportInvalid {
+        reason: "could not read import file".to_owned(),
+    })?;
+    let payload = storage::EventExport::parse(&input)?;
+    let count = storage::import_events(database, &payload).await?;
+    print_debug(
+        json,
+        "event.import",
+        serde_json::json!({ "imported": count }),
+    )
+}
+
+/// Read an iCalendar file and add every event it holds to one calendar.
+async fn import_ics(
+    database: &config::ConnectionSettings,
+    file: &PathBuf,
+    calendar: CalendarId,
+    json: bool,
+) -> Result<(), AppError> {
+    let events = read_ics_file(file, calendar)?;
+    let recurring = events
+        .iter()
+        .filter(|event| event.metadata.recurrence_rule.is_some())
+        .count();
+    let count = storage::import_ics_events(database, calendar, &events).await?;
+    print_debug(
+        json,
+        "event.import-ics",
+        serde_json::json!({ "imported": count, "recurring": recurring }),
+    )
+}
+
+/// Read an iCalendar file into events belonging to one calendar.
+fn read_ics_file(file: &PathBuf, calendar: CalendarId) -> Result<Vec<Event>, AppError> {
+    let document = std::fs::read_to_string(file).map_err(|_| StorageError::ImportInvalid {
+        reason: "could not read iCalendar file".to_owned(),
+    })?;
+    let parsed =
+        mg_calr::ics::read(&document).map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let mut events = Vec::with_capacity(parsed.len());
+    for source in parsed {
+        let mut event = Event::new(calendar, source.title, source.time)?;
+        // The file's own UID is what makes a second import a conflict
+        if let Some(uid) = source.uid {
+            event.rfc_uid = RfcUid::new(uid)?;
+        }
+        event.metadata.description = source.description;
+        event.metadata.recurrence_rule = source.recurrence;
+        events.push(event);
+    }
+    Ok(events)
+}
+
 fn query_error(error: QueryError<StorageError>) -> AppError {
     match error {
         QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
@@ -862,18 +928,10 @@ async fn run_event_command(
             println!("{}", serde_json::to_string(&payload)?);
             Ok(())
         }
-        EventCommand::Import { file } => {
-            let input = std::fs::read_to_string(file).map_err(|_| StorageError::ImportInvalid {
-                reason: "could not read import file".to_owned(),
-            })?;
-            let payload = storage::EventExport::parse(&input)?;
-            let count = storage::import_events(&database, &payload).await?;
-            print_debug(
-                json,
-                "event.import",
-                serde_json::json!({ "imported": count }),
-            )
+        EventCommand::ImportIcs { file, calendar } => {
+            import_ics(&database, file, *calendar, json).await
         }
+        EventCommand::Import { file } => import_export_document(&database, file, json).await,
     }
 }
 

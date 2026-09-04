@@ -2587,6 +2587,90 @@ pub async fn export_snapshot_sources(
 }
 
 /// Import a fully validated calendar/event document atomically without overwriting.
+/// Write one complete event row inside an open transaction.
+async fn insert_event_row(
+    tx: &tokio_postgres::Transaction<'_>,
+    event: &Event,
+) -> Result<(), StorageError> {
+    let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &event.time {
+        EventTime::Timed {
+            start,
+            end,
+            timezone,
+        } => (
+            Some(timezone.as_str()),
+            Some(start.with_timezone(&Utc)),
+            Some(end.with_timezone(&Utc)),
+            None,
+            None,
+        ),
+        EventTime::AllDay {
+            start,
+            end_exclusive,
+        } => (None, None, None, Some(*start), Some(*end_exclusive)),
+    };
+    let status = event.metadata.status.map(event_status);
+    let extension_properties = serde_json::json!({
+        "categories": event.metadata.categories,
+        "alarms": event.metadata.alarms,
+        "organizer": event.metadata.organizer,
+        "attendees": event.metadata.attendees,
+    });
+    tx.execute(
+        "INSERT INTO events (id,calendar_id,rfc_uid,title,description,location,url,status,busy,timezone,starts_at,ends_at,all_day_start,all_day_end,recurrence_rule,extension_properties,created_at,updated_at,deleted_at,remote_tombstoned_at,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+        &[&event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(), &event.title, &event.metadata.description, &event.metadata.location, &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at, &ends_at, &all_day_start, &all_day_end, &recurrence_value(event.metadata.recurrence_rule.as_ref())?, &extension_properties, &event.created_at, &event.updated_at, &event.deleted_at, &event.remote_tombstoned_at, &event.version],
+    ).await.map_err(StorageError::Query)?;
+    Ok(())
+}
+
+/// Add events read from an iCalendar file to one existing calendar, atomically.
+///
+/// A UID already present is an import conflict: re-importing the same file must
+/// not silently double a schedule.
+///
+/// # Errors
+/// Returns an error for a missing calendar, a UID already stored, or a query failure.
+pub async fn import_ics_events(
+    settings: &ConnectionSettings,
+    calendar_id: CalendarId,
+    events: &[Event],
+) -> Result<usize, StorageError> {
+    let (mut client, _) = connect(settings).await?;
+    let tx = client.transaction().await.map_err(StorageError::Query)?;
+    if tx
+        .query_opt(
+            "SELECT 1 FROM calendars WHERE id = $1 AND deleted_at IS NULL",
+            &[&calendar_id.as_uuid()],
+        )
+        .await
+        .map_err(StorageError::Query)?
+        .is_none()
+    {
+        return Err(StorageError::ImportInvalid {
+            reason: format!("calendar {calendar_id} does not exist"),
+        });
+    }
+    for event in events {
+        if tx
+            .query_opt(
+                "SELECT 1 FROM events WHERE rfc_uid = $1",
+                &[&event.rfc_uid.as_str()],
+            )
+            .await
+            .map_err(StorageError::Query)?
+            .is_some()
+        {
+            return Err(StorageError::ImportConflict {
+                kind: "event",
+                id: event.rfc_uid.as_str().to_owned(),
+            });
+        }
+        insert_event_row(&tx, event).await?;
+    }
+    tx.commit().await.map_err(StorageError::Query)?;
+    Ok(events.len())
+}
+
 pub async fn import_events(
     settings: &ConnectionSettings,
     payload: &EventExport,
@@ -2649,34 +2733,7 @@ pub async fn import_events(
         ).await.map_err(StorageError::Query)?;
     }
     for event in &payload.events {
-        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &event.time {
-            EventTime::Timed {
-                start,
-                end,
-                timezone,
-            } => (
-                Some(timezone.as_str()),
-                Some(start.with_timezone(&Utc)),
-                Some(end.with_timezone(&Utc)),
-                None,
-                None,
-            ),
-            EventTime::AllDay {
-                start,
-                end_exclusive,
-            } => (None, None, None, Some(*start), Some(*end_exclusive)),
-        };
-        let status = event.metadata.status.map(event_status);
-        let extension_properties = serde_json::json!({
-            "categories": event.metadata.categories,
-            "alarms": event.metadata.alarms,
-            "organizer": event.metadata.organizer,
-            "attendees": event.metadata.attendees,
-        });
-        tx.execute(
-            "INSERT INTO events (id,calendar_id,rfc_uid,title,description,location,url,status,busy,timezone,starts_at,ends_at,all_day_start,all_day_end,recurrence_rule,extension_properties,created_at,updated_at,deleted_at,remote_tombstoned_at,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
-            &[&event.id.as_uuid(), &event.calendar_id.as_uuid(), &event.rfc_uid.as_str(), &event.title, &event.metadata.description, &event.metadata.location, &event.metadata.url, &status, &event.metadata.busy, &timezone, &starts_at, &ends_at, &all_day_start, &all_day_end, &recurrence_value(event.metadata.recurrence_rule.as_ref())?, &extension_properties, &event.created_at, &event.updated_at, &event.deleted_at, &event.remote_tombstoned_at, &event.version],
-        ).await.map_err(StorageError::Query)?;
+        insert_event_row(&tx, event).await?;
     }
     tx.commit().await.map_err(StorageError::Query)?;
     Ok(payload.calendars.len() + payload.events.len())
