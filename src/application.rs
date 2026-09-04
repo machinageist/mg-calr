@@ -5,7 +5,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde::Serialize;
 use thiserror::Error;
@@ -813,7 +813,11 @@ fn overlapping_base(
     }
 }
 
-fn agenda_order(item: &AgendaItem, zone: Tz) -> (NaiveDate, u8, String, String, u32) {
+/// Order a day the way it is lived: all-day first, then by the clock.
+///
+/// Title is only a tie-break. Sorting a day by title alone put a 23:20 shutdown
+/// ahead of an 08:00 wake, which is not a day anyone can read.
+fn agenda_order(item: &AgendaItem, zone: Tz) -> (NaiveDate, u8, u32, u8, String, String, u32) {
     let date = item
         .due
         .as_ref()
@@ -824,13 +828,27 @@ fn agenda_order(item: &AgendaItem, zone: Tz) -> (NaiveDate, u8, String, String, 
                 .map(|time| event_time_date(time, zone))
         })
         .unwrap_or(NaiveDate::MAX);
+    let (timed, minute) = agenda_start_minute(item, zone);
     (
         date,
+        timed,
+        minute,
         u8::from(item.kind != AgendaKind::Event),
         item.title.to_lowercase(),
         item.id.clone(),
         item.occurrence_index.unwrap_or(0),
     )
+}
+
+/// Whether a row is timed, and how far into its local day it starts.
+fn agenda_start_minute(item: &AgendaItem, zone: Tz) -> (u8, u32) {
+    let local = match (&item.due, &item.event_time) {
+        (Some(TodoDue::Timed { at, .. }), _) => Some(at.with_timezone(&zone).time()),
+        (None, Some(EventTime::Timed { start, .. })) => Some(start.with_timezone(&zone).time()),
+        // An all-day due value, an all-day event, or a row carrying no time at all
+        _ => None,
+    };
+    local.map_or((0, 0), |time| (1, time.hour() * 60 + time.minute()))
 }
 
 fn todo_due_date(due: &TodoDue, zone: Tz) -> NaiveDate {

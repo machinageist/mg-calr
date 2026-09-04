@@ -468,3 +468,75 @@ fn recurring_occurrences_order_alongside_the_todos_already_there() {
         ]
     );
 }
+
+#[test]
+fn a_day_is_ordered_by_the_clock_with_all_day_rows_leading_it() {
+    let calendar = Calendar::new("study").unwrap();
+    let timed = |title: &str, start: &str, end: &str| {
+        Event::new(
+            calendar.id,
+            title,
+            EventTime::timed(
+                start.parse().unwrap(),
+                end.parse().unwrap(),
+                "America/Los_Angeles",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    // Titles that would sort the day backwards if title led the key
+    let shutdown = timed(
+        "Shutdown",
+        "2026-09-07T23:20:00-07:00",
+        "2026-09-07T23:59:00-07:00",
+    );
+    let wake = timed(
+        "Wake",
+        "2026-09-07T08:00:00-07:00",
+        "2026-09-07T08:15:00-07:00",
+    );
+    let midday = timed(
+        "Alpha lunch",
+        "2026-09-07T12:00:00-07:00",
+        "2026-09-07T13:00:00-07:00",
+    );
+    let holiday = Event::new(
+        calendar.id,
+        "Zulu all-day",
+        EventTime::all_day(date("2026-09-07"), date("2026-09-08")).unwrap(),
+    )
+    .unwrap();
+    let mut errand = Todo::new("Beta reminder").unwrap();
+    errand.due = Some(
+        TodoDue::timed(
+            "2026-09-07T09:30:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    );
+
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-09-07"), date("2026-09-08"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![shutdown, wake, midday, holiday],
+        vec![errand],
+    )
+    .unwrap();
+
+    assert_eq!(
+        output
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Zulu all-day",
+            "Wake",
+            "Beta reminder",
+            "Alpha lunch",
+            "Shutdown"
+        ]
+    );
+}
