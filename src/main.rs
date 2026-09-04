@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
@@ -1052,37 +1053,56 @@ fn print_agenda(json: bool, output: AgendaOutput) -> Result<(), AppError> {
                 .signed_duration_since(metadata.created_at)
                 .num_seconds()
                 .max(0);
+            // Full snapshot identity stays in --json; a person needs freshness and truthfulness
             println!(
-                "projection\tproducer={}@{} producer_revision={} source_revision={} content_revision={} age={}s complete={}",
+                "todos from {}@{} rev {}, {} old, {}",
                 metadata.producer,
                 metadata.producer_version,
                 metadata.producer_revision,
-                metadata.source_revision,
-                metadata.content_revision,
-                age,
-                metadata.completeness.complete
+                describe_age(age),
+                if metadata.completeness.complete {
+                    "complete"
+                } else {
+                    "INCOMPLETE"
+                }
             );
         }
+        let zone = output.timezone.parse::<Tz>().ok();
+        let mut day = None;
         for item in &output.items {
-            println!("{}", format_agenda_item(item));
+            if let Some(zone) = zone {
+                let on = item.on(zone);
+                if on.is_some() && on != day {
+                    day = on;
+                    println!("{}", on.map_or_else(String::new, |date| date.to_string()));
+                }
+            }
+            println!("{}", format_agenda_item(item, zone));
         }
     }
     Ok(())
 }
 
-fn format_agenda_item(item: &AgendaItem) -> String {
+/// Snapshot age in the coarsest unit that still tells the truth.
+fn describe_age(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
+}
+
+fn format_agenda_item(item: &AgendaItem, zone: Option<Tz>) -> String {
     let kind = match item.kind {
         AgendaKind::Event => "event",
         AgendaKind::Todo => "todo",
     };
-    let detail = item.due.as_ref().map_or_else(
-        || format!("event_time={:?}", item.event_time),
-        |due| format!("due={due:?}"),
-    );
-    format!(
-        "{kind}\t{}\t{}\t{detail}\tcompleted={} trashed={} blocked={}",
-        item.id, item.title, item.completed, item.trashed, item.blocked
-    )
+    let when = zone.map_or_else(|| "unscheduled".to_owned(), |zone| item.when(zone));
+    format!("  {when:<11}  {:<40}  {kind}{}", item.title, item.notes())
 }
 
 async fn run_tui(

@@ -475,6 +475,64 @@ pub struct AgendaItem {
     pub blocked: bool,
 }
 
+impl AgendaItem {
+    /// When this item falls, expressed in the zone the agenda was queried in.
+    #[must_use]
+    pub fn when(&self, zone: Tz) -> String {
+        if let Some(due) = &self.due {
+            return match due {
+                TodoDue::Date { .. } => "all-day".to_owned(),
+                TodoDue::Timed { at, .. } => at.with_timezone(&zone).format("%H:%M").to_string(),
+            };
+        }
+        match &self.event_time {
+            None => "unscheduled".to_owned(),
+            Some(EventTime::AllDay { .. }) => "all-day".to_owned(),
+            Some(EventTime::Timed { start, end, .. }) => format!(
+                "{}-{}",
+                start.with_timezone(&zone).format("%H:%M"),
+                end.with_timezone(&zone).format("%H:%M")
+            ),
+        }
+    }
+
+    /// The civil date this item belongs to in one zone.
+    #[must_use]
+    pub fn on(&self, zone: Tz) -> Option<NaiveDate> {
+        if let Some(due) = &self.due {
+            return Some(match due {
+                TodoDue::Date { date, .. } => *date,
+                TodoDue::Timed { at, .. } => at.with_timezone(&zone).date_naive(),
+            });
+        }
+        match &self.event_time {
+            None => None,
+            Some(EventTime::AllDay { start, .. }) => Some(*start),
+            Some(EventTime::Timed { start, .. }) => Some(start.with_timezone(&zone).date_naive()),
+        }
+    }
+
+    /// Lifecycle notes worth showing beside the title.
+    #[must_use]
+    pub fn notes(&self) -> String {
+        let mut notes = Vec::new();
+        if self.completed {
+            notes.push("done");
+        }
+        if self.trashed {
+            notes.push("trashed");
+        }
+        if self.blocked {
+            notes.push("blocked");
+        }
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", notes.join(", "))
+        }
+    }
+}
+
 /// Half-open civil-date bounds and lifecycle filters for an agenda query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgendaQuery {
@@ -525,6 +583,8 @@ impl AgendaQuery {
 pub struct AgendaOutput {
     pub start: NaiveDate,
     pub end_exclusive: NaiveDate,
+    /// The IANA zone the window and every rendered time is expressed in
+    pub timezone: String,
     pub todo_projection: Option<TodoProjectionMetadata>,
     pub items: Vec<AgendaItem>,
 }
@@ -637,6 +697,7 @@ impl AgendaOutput {
         Ok(Self {
             start: query.start,
             end_exclusive: query.end_exclusive,
+            timezone: query.timezone.clone(),
             todo_projection,
             items,
         })

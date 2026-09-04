@@ -112,20 +112,23 @@ impl TuiState {
                 .max(0);
             let _ = writeln!(
                 frame,
-                "projection {}@{} rev={} source={} content={} age={}s complete={}",
+                "todos from {}@{} rev {}, {}s old, {}",
                 metadata.producer,
                 metadata.producer_version,
                 metadata.producer_revision,
-                metadata.source_revision,
-                metadata.content_revision,
                 age,
-                metadata.completeness.complete
+                if metadata.completeness.complete {
+                    "complete"
+                } else {
+                    "INCOMPLETE"
+                }
             );
         }
         frame.push_str("────────────────────────────────────────\n");
         if agenda.items.is_empty() {
             frame.push_str("  (no agenda items)\n");
         } else {
+            let zone = agenda.timezone.parse::<chrono_tz::Tz>().ok();
             for (index, item) in agenda.items.iter().enumerate() {
                 let marker = if index == self.selected { ">" } else { " " };
                 let kind = match item.kind {
@@ -134,15 +137,13 @@ impl TuiState {
                 };
                 let occurrence = item
                     .occurrence_index
-                    .map_or_else(String::new, |index| format!(" occurrence={index}"));
-                let detail = match item.kind {
-                    AgendaKind::Event => format!("event={:?}", item.event_time),
-                    AgendaKind::Todo => format!("due={:?}", item.due),
-                };
+                    .map_or_else(String::new, |index| format!(" #{index}"));
+                let when = zone.map_or_else(|| "unscheduled".to_owned(), |zone| item.when(zone));
                 let _ = writeln!(
                     frame,
-                    "{marker} [{kind}] {} | {detail}{occurrence}",
-                    item.title
+                    "{marker} {when:<11} {} [{kind}]{}{occurrence}",
+                    item.title,
+                    item.notes()
                 );
             }
         }
@@ -217,6 +218,7 @@ mod tests {
         let agenda = AgendaOutput {
             start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            timezone: "UTC".to_owned(),
             todo_projection: None,
             items: Vec::new(),
         };
@@ -234,6 +236,7 @@ mod tests {
         let agenda = AgendaOutput {
             start: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             end_exclusive: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            timezone: "UTC".to_owned(),
             todo_projection: None,
             items: vec![AgendaItem {
                 kind: AgendaKind::Todo,
@@ -249,7 +252,7 @@ mod tests {
             }],
         };
         let frame = TuiState::new().render(&agenda);
-        assert!(frame.contains("> [todo] Standup | due=None occurrence=2"));
+        assert!(frame.contains("> unscheduled Standup [todo] #2"));
     }
 
     #[test]

@@ -208,3 +208,89 @@ fn agenda_completed_prerequisite_does_not_block_dependent() {
     assert_eq!(output.items[0].title, "Dependent");
     assert!(!output.items[0].blocked);
 }
+
+#[test]
+fn agenda_items_render_their_time_in_the_queried_zone() {
+    let calendar = Calendar::new("work").unwrap();
+    let standup = Event::new(
+        calendar.id,
+        "Standup",
+        EventTime::timed(
+            "2026-08-24T09:00:00-04:00".parse().unwrap(),
+            "2026-08-24T09:30:00-04:00".parse().unwrap(),
+            "America/New_York",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut call = Todo::new("Call the bank").unwrap();
+    call.due = Some(
+        TodoDue::timed(
+            "2026-08-24T15:30:00-04:00".parse().unwrap(),
+            "America/New_York",
+        )
+        .unwrap(),
+    );
+    let mut rent = Todo::new("Pay rent").unwrap();
+    rent.due = Some(TodoDue::date(date("2026-08-24"), "America/New_York").unwrap());
+
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-08-24"), date("2026-08-25"))
+            .with_timezone("US/Pacific")
+            .unwrap(),
+        vec![standup],
+        vec![call, rent],
+    )
+    .unwrap();
+
+    assert_eq!(output.timezone, "US/Pacific");
+    let zone: chrono_tz::Tz = output.timezone.parse().unwrap();
+    let rendered = output
+        .items
+        .iter()
+        .map(|item| (item.title.clone(), item.when(zone), item.on(zone)))
+        .collect::<Vec<_>>();
+
+    // Eastern wall times are restated in the zone the day was asked for
+    assert!(rendered.contains(&(
+        "Standup".to_owned(),
+        "06:00-06:30".to_owned(),
+        Some(date("2026-08-24"))
+    )));
+    assert!(rendered.contains(&(
+        "Call the bank".to_owned(),
+        "12:30".to_owned(),
+        Some(date("2026-08-24"))
+    )));
+    // An all-day value keeps its civil date rather than shifting across the offset
+    assert!(rendered.contains(&(
+        "Pay rent".to_owned(),
+        "all-day".to_owned(),
+        Some(date("2026-08-24"))
+    )));
+}
+
+#[test]
+fn agenda_items_state_a_closed_or_blocked_lifecycle() {
+    let mut done = Todo::new("Water the plants").unwrap();
+    done.due = Some(TodoDue::date(date("2026-08-24"), "UTC").unwrap());
+    done.completed_at = Some("2026-08-24T10:00:00Z".parse().unwrap());
+
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery {
+            include_completed: true,
+            ..AgendaQuery::new(date("2026-08-24"), date("2026-08-25"))
+        },
+        Vec::new(),
+        vec![done],
+    )
+    .unwrap();
+
+    let item = output
+        .items
+        .iter()
+        .find(|item| item.kind == AgendaKind::Todo)
+        .expect("completed todo is included");
+    assert_eq!(item.notes(), "  (done)");
+    assert_eq!(item.when("UTC".parse().unwrap()), "all-day");
+}
