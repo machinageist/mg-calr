@@ -704,6 +704,7 @@ fn query_error(error: QueryError<StorageError>) -> AppError {
         }
         QueryError::Repository(error) => AppError::Storage(error),
         QueryError::Domain(error) => AppError::Todo(error),
+        QueryError::EventDomain(error) => AppError::Domain(error),
     }
 }
 
@@ -717,6 +718,7 @@ fn agenda_query_error(error: QueryError<AgendaRepositoryError>) -> AppError {
             AppError::Projection(error)
         }
         QueryError::Domain(error) => AppError::Todo(error),
+        QueryError::EventDomain(error) => AppError::Domain(error),
         QueryError::EventNotFound { event_id } => AppError::EventNotFound { event_id },
         QueryError::TodoNotFound { todo_id } => AppError::TodoNotFound { todo_id },
         QueryError::ProjectNotFound { project_id } => {

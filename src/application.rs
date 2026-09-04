@@ -258,6 +258,8 @@ pub enum QueryError<E: std::error::Error + 'static> {
     Repository(E),
     #[error(transparent)]
     Domain(#[from] crate::domain::todo::TodoError),
+    #[error(transparent)]
+    EventDomain(#[from] crate::domain::DomainError),
 }
 
 #[derive(Debug, Error)]
@@ -635,36 +637,40 @@ impl AgendaOutput {
             .filter(|todo| todo.trashed_at.is_none() && todo.completed_at.is_none())
             .map(|todo| todo.id)
             .collect();
+        let through = query.end_exclusive.pred_opt().ok_or(QueryError::Domain(
+            crate::domain::todo::TodoError::InvalidRecurrenceRange,
+        ))?;
         let mut items = Vec::new();
         for event in events {
-            let overlaps = match &event.time {
-                EventTime::AllDay {
-                    start,
-                    end_exclusive,
-                } => *start < query.end_exclusive && *end_exclusive > query.start,
-                EventTime::Timed { start, end, .. } => {
-                    start.with_timezone(&zone) < window_end
-                        && end.with_timezone(&zone) > window_start
-                }
+            if event.deleted_at.is_some() {
+                continue;
+            }
+            // A rule replaces the base time with the occurrences it implies; an
+            // event without one keeps the single-instance path it always had.
+            let occurrences = match &event.metadata.recurrence_rule {
+                None => overlapping_base(&event.time, query, zone, window_start, window_end),
+                Some(rule) => rule
+                    .expand(&event.time, query.start, through)
+                    .map_err(QueryError::EventDomain)?
+                    .into_iter()
+                    .map(|(index, time)| (Some(index), time))
+                    .collect(),
             };
-            if overlaps && event.deleted_at.is_none() {
+            for (occurrence_index, time) in occurrences {
                 items.push(AgendaItem {
                     kind: AgendaKind::Event,
                     id: event.id.to_string(),
-                    title: event.title,
+                    title: event.title.clone(),
                     due: None,
-                    event_time: Some(event.time),
+                    event_time: Some(time),
                     priority: None,
-                    occurrence_index: None,
+                    occurrence_index,
                     completed: false,
-                    trashed: event.deleted_at.is_some(),
+                    trashed: false,
                     blocked: false,
                 });
             }
         }
-        let through = query.end_exclusive.pred_opt().ok_or(QueryError::Domain(
-            crate::domain::todo::TodoError::InvalidRecurrenceRange,
-        ))?;
         for todo in todos {
             let completed = todo.completed_at.is_some();
             let trashed = todo.trashed_at.is_some();
@@ -761,6 +767,7 @@ fn map_agenda_error<E: std::error::Error + 'static>(
             QueryError::InvalidDayBoundary { date, timezone }
         }
         QueryError::Domain(error) => QueryError::Domain(error),
+        QueryError::EventDomain(error) => QueryError::EventDomain(error),
         QueryError::Repository(error) => match error {},
         QueryError::EventNotFound { event_id } => QueryError::EventNotFound { event_id },
         QueryError::TodoNotFound { todo_id } => QueryError::TodoNotFound { todo_id },
@@ -779,6 +786,30 @@ fn local_day_boundary(
             date,
             timezone: timezone.to_owned(),
         }),
+    }
+}
+
+/// The base time of a non-recurring event, when it overlaps the queried window.
+fn overlapping_base(
+    time: &EventTime,
+    query: &AgendaQuery,
+    zone: Tz,
+    window_start: DateTime<Tz>,
+    window_end: DateTime<Tz>,
+) -> Vec<(Option<u32>, EventTime)> {
+    let overlaps = match time {
+        EventTime::AllDay {
+            start,
+            end_exclusive,
+        } => *start < query.end_exclusive && *end_exclusive > query.start,
+        EventTime::Timed { start, end, .. } => {
+            start.with_timezone(&zone) < window_end && end.with_timezone(&zone) > window_start
+        }
+    };
+    if overlaps {
+        vec![(None, time.clone())]
+    } else {
+        Vec::new()
     }
 }
 

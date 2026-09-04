@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use mg_calr::application::{AgendaKind, AgendaOutput, AgendaQuery, QueryError};
 use mg_calr::domain::todo::{RecurrenceFrequency, RecurrenceRule, Todo, TodoDue};
-use mg_calr::domain::{Calendar, Event, EventTime};
+use mg_calr::domain::{Calendar, Event, EventFrequency, EventRecurrence, EventTime};
 
 fn date(value: &str) -> NaiveDate {
     value.parse().expect("valid date")
@@ -293,4 +293,178 @@ fn agenda_items_state_a_closed_or_blocked_lifecycle() {
         .expect("completed todo is included");
     assert_eq!(item.notes(), "  (done)");
     assert_eq!(item.when("UTC".parse().unwrap()), "all-day");
+}
+
+#[test]
+fn a_recurring_event_lists_every_occurrence_inside_the_window() {
+    let calendar = Calendar::new("study").unwrap();
+    let mut standup = Event::new(
+        calendar.id,
+        "Wake",
+        EventTime::timed(
+            "2026-09-07T08:00:00-07:00".parse().unwrap(),
+            "2026-09-07T08:15:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    standup.metadata.recurrence_rule = Some(
+        EventRecurrence::new(
+            EventFrequency::Weekly,
+            1,
+            Some(78),
+            None,
+            vec![
+                chrono::Weekday::Mon,
+                chrono::Weekday::Tue,
+                chrono::Weekday::Wed,
+                chrono::Weekday::Thu,
+                chrono::Weekday::Fri,
+                chrono::Weekday::Sat,
+            ],
+        )
+        .unwrap(),
+    );
+
+    // One working week, so Sunday the 13th contributes nothing
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-09-07"), date("2026-09-14"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![standup],
+        Vec::new(),
+    )
+    .unwrap();
+
+    assert_eq!(output.items.len(), 6);
+    let indexes: Vec<u32> = output
+        .items
+        .iter()
+        .filter_map(|item| item.occurrence_index)
+        .collect();
+    assert_eq!(indexes, vec![0, 1, 2, 3, 4, 5]);
+    for item in &output.items {
+        assert_eq!(item.kind, AgendaKind::Event);
+        assert_eq!(
+            item.when("America/Los_Angeles".parse().unwrap()),
+            "08:00-08:15"
+        );
+    }
+}
+
+#[test]
+fn a_window_after_the_series_ends_lists_nothing() {
+    let calendar = Calendar::new("study").unwrap();
+    let mut weekly = Event::new(
+        calendar.id,
+        "Review",
+        EventTime::timed(
+            "2026-09-07T17:00:00-07:00".parse().unwrap(),
+            "2026-09-07T18:00:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    weekly.metadata.recurrence_rule =
+        Some(EventRecurrence::new(EventFrequency::Weekly, 1, Some(2), None, Vec::new()).unwrap());
+
+    let inside = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-09-07"), date("2026-09-21"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![weekly.clone()],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(inside.items.len(), 2);
+
+    let after = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-10-05"), date("2026-10-12"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![weekly],
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(after.items.is_empty());
+}
+
+#[test]
+fn an_event_without_a_rule_keeps_its_single_instance_and_no_index() {
+    let calendar = Calendar::new("work").unwrap();
+    let once = Event::new(
+        calendar.id,
+        "Standup",
+        EventTime::timed(
+            "2026-09-07T09:00:00-07:00".parse().unwrap(),
+            "2026-09-07T09:30:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-09-07"), date("2026-09-14"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![once],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(output.items.len(), 1);
+    assert_eq!(output.items[0].occurrence_index, None);
+}
+
+#[test]
+fn recurring_occurrences_order_alongside_the_todos_already_there() {
+    let calendar = Calendar::new("study").unwrap();
+    let mut morning = Event::new(
+        calendar.id,
+        "Wake",
+        EventTime::timed(
+            "2026-09-07T08:00:00-07:00".parse().unwrap(),
+            "2026-09-07T08:15:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    morning.metadata.recurrence_rule =
+        Some(EventRecurrence::new(EventFrequency::Daily, 1, Some(3), None, Vec::new()).unwrap());
+    let mut errand = Todo::new("Pay rent").unwrap();
+    errand.due = Some(
+        TodoDue::timed(
+            "2026-09-08T12:00:00-07:00".parse().unwrap(),
+            "America/Los_Angeles",
+        )
+        .unwrap(),
+    );
+
+    let output = AgendaOutput::from_snapshot(
+        AgendaQuery::new(date("2026-09-07"), date("2026-09-10"))
+            .with_timezone("America/Los_Angeles")
+            .unwrap(),
+        vec![morning],
+        vec![errand],
+    )
+    .unwrap();
+
+    let zone: chrono_tz::Tz = "America/Los_Angeles".parse().unwrap();
+    let ordered: Vec<(String, String)> = output
+        .items
+        .iter()
+        .map(|item| (item.on(zone).unwrap().to_string(), item.title.clone()))
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("2026-09-07".to_owned(), "Wake".to_owned()),
+            ("2026-09-08".to_owned(), "Wake".to_owned()),
+            ("2026-09-08".to_owned(), "Pay rent".to_owned()),
+            ("2026-09-09".to_owned(), "Wake".to_owned()),
+        ]
+    );
 }
