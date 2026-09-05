@@ -1,8 +1,8 @@
 # Scorecard: Event and Calendar Core
 
 **Feature ID:** b-event-calendar-core
-**Spec file:** gauntlet-output/specs/b-event-calendar-core.md
-**Reviewer agent:** blind verification agent (Spec Gauntlet)
+**Spec file:** docs/specs/b-event-calendar-core.md
+**Reviewer agent:** blind verification agent
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 2 — blind-review remediation
 

@@ -2,7 +2,7 @@
 
 **Feature ID:** a-foundation
 **Parent feature:** root
-**Spec author agent:** Foundation spec agent (Spec Gauntlet)
+**Spec author agent:** Foundation spec agent
 **Date:** 2026-08-29
 **Iteration:** 2
 
@@ -544,7 +544,7 @@ Walking the Lens 3 criteria by name, per the criteria file's allowance that a fo
 ### 7.4 Blocking dependencies
 
 - **External, for database commands only:** a PostgreSQL 18-compatible server plus an administrator-created peer role and `mg_calr` database. Non-database foundation commands and the default test suite have no such dependency.
-- **Internal ordering:** A5's `audit_transactions`/`OperationClaim` must land before B or C acceptance, because those features' expected-revision and receipt contracts (`gauntlet-output/specs/b-event-calendar-core.md` §4.4.1, `c-todo-core.md` §7.4) depend on it. A3 short-ID resolution must land before D10's chooser and before any C/D command advertises short selectors; D9 and D10 own the display/chooser layer above A3's resolver and must not re-implement it.
+- **Internal ordering:** A5's `audit_transactions`/`OperationClaim` must land before B or C acceptance, because those features' expected-revision and receipt contracts (`docs/specs/b-event-calendar-core.md` §4.4.1, `c-todo-core.md` §7.4) depend on it. A3 short-ID resolution must land before D10's chooser and before any C/D command advertises short selectors; D9 and D10 own the display/chooser layer above A3's resolver and must not re-implement it.
 - **Nothing in A blocks on B–I.** A must never take a dependency on a downstream feature; the direction is one-way by design.
 - **Release-only gates:** the MIT vs. Apache-2.0 decision blocks adding `LICENSE` and publishing (H2); G5 must define forward-only/rollback policy before any breaking migration ships to a database holding real data.
 

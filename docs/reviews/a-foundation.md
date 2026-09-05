@@ -1,8 +1,8 @@
 # Scorecard: Application Foundation
 
 **Feature ID:** a-foundation
-**Spec file:** gauntlet-output/specs/a-foundation.md
-**Reviewer agent:** Blind verification agent (Spec Gauntlet)
+**Spec file:** docs/specs/a-foundation.md
+**Reviewer agent:** Blind verification agent
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 2
 

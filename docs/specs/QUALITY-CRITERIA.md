@@ -1,7 +1,7 @@
 # mg-calr — Binding Quality Criteria
 
 **Generated:** 2026-08-23
-**Evidence:** accepted product interview and `mg-calr-gauntlet-plan.md`
+**Evidence:** accepted product interview and the accepted spec plan
 **Criteria version:** 1
 
 ## Scoring contract

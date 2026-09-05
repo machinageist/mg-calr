@@ -2,7 +2,7 @@
 
 **Feature ID:** f-import-export-sync
 **Parent feature:** root
-**Spec author agent:** Spec Gauntlet agent F
+**Spec author agent:** Spec agent F
 **Date:** 2026-08-29
 **Iteration:** 1
 

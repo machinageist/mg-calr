@@ -1,7 +1,7 @@
 # Scorecard: Views, Querying, and Output
 
 **Feature ID:** d-views-query-output
-**Spec file:** gauntlet-output/specs/d-views-query-output.md
+**Spec file:** docs/specs/d-views-query-output.md
 **Reviewer agent:** Verification Agent (blind review)
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 2

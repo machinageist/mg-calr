@@ -1,8 +1,8 @@
 # Scorecard: Import, Export, and Synchronization
 
 **Feature ID:** f-import-export-sync
-**Spec file:** gauntlet-output/specs/f-import-export-sync.md
-**Reviewer agent:** Spec Gauntlet verification agent (blind review)
+**Spec file:** docs/specs/f-import-export-sync.md
+**Reviewer agent:** Verification agent (blind review)
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 1
 **Graded against:** `git rev-parse --short HEAD` = `6e855f9`, with uncommitted working-tree

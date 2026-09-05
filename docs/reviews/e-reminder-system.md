@@ -1,8 +1,8 @@
 # Scorecard: Reminder System
 
 **Feature ID:** e-reminder-system
-**Spec file:** gauntlet-output/specs/e-reminder-system.md
-**Reviewer agent:** blind verification agent (Spec Gauntlet)
+**Spec file:** docs/specs/e-reminder-system.md
+**Reviewer agent:** blind verification agent
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 2
 **Graded against commit:** `6e855f9`

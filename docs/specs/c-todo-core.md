@@ -389,7 +389,7 @@ Criteria alignment also covers T1 immutable typed IDs; T2 date/timed zone and sc
 
 ### 7.1 What exists today
 
-**Implemented foundation:** `gauntlet-output/specs/a-foundation.md` records typed `TodoId`/`ReminderId`, PostgreSQL connection/migration contracts, migration-1 `todos`, `todo_dependencies`, `reminders`, `reminder_deliveries`, audit scaffolding, A4 JSON/error envelopes, and isolated database-test conventions.
+**Implemented foundation:** `docs/specs/a-foundation.md` records typed `TodoId`/`ReminderId`, PostgreSQL connection/migration contracts, migration-1 `todos`, `todo_dependencies`, `reminders`, `reminder_deliveries`, audit scaffolding, A4 JSON/error envelopes, and isolated database-test conventions.
 
 **Absent todo behavior:** the same foundation spec explicitly says DAG cycle rejection, parent completion, recurrence, scanner behavior, and functional audit/undo remain later slices; its gap analysis states all todo workflows are absent. No evidence supplied to this spec shows C1–C8 commands, application use cases, graph enforcement, recurrence materialization, organization tables, or reminder eligibility implemented.
 

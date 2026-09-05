@@ -1,7 +1,7 @@
 # Scorecard: Packaging and Developer Experience
 
 **Feature ID:** h-packaging-devex
-**Spec file:** gauntlet-output/specs/h-packaging-devex.md
+**Spec file:** docs/specs/h-packaging-devex.md
 **Reviewer agent:** Verification Agent (blind review)
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 1
@@ -96,7 +96,7 @@
 
 ## Feasibility Check
 
-Verified against `6e855f9` plus the uncommitted working tree. `ls -a` and `find` confirm the repository contains only `Cargo.toml`, `Cargo.lock`, `README.md`, `.gitignore`, `config/`, `docs/`, `migrations/`, `src/`, `tests/`, `target/`, `gauntlet-*/`.
+Verified against `6e855f9` plus the uncommitted working tree. `ls -a` and `find` confirm the repository contains only `Cargo.toml`, `Cargo.lock`, `README.md`, `.gitignore`, `config/`, `docs/`, `migrations/`, `src/`, `tests/` and `target/`.
 
 | Check | Status | Notes |
 |---|---|---|

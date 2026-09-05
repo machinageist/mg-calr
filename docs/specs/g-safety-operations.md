@@ -2,7 +2,7 @@
 
 **Feature ID:** g-safety-operations
 **Parent feature:** root
-**Spec author agent:** Spec agent G (Spec Gauntlet)
+**Spec author agent:** Spec agent G
 **Date:** 2026-08-29
 **Iteration:** 1
 

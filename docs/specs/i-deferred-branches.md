@@ -1,6 +1,6 @@
 # Spec: Later Branches — Approved but Deferred (TUI, Quickshell, CalDAV Scheduling, Broader Packaging)
 
-**Feature ID:** i-deferred-branches **Parent feature:** root **Spec author agent:** Gauntlet spec agent (branch I) **Date:** 2026-08-29 **Iteration:** 1
+**Feature ID:** i-deferred-branches **Parent feature:** root **Spec author agent:** Spec agent (branch I) **Date:** 2026-08-29 **Iteration:** 1
 
 > **Status: deferred by schedule, not by uncertainty.** Nothing in branch I is next up. No
 > I-branch code may be written until its blocking dependencies in §7.4 land. This document
@@ -10,7 +10,7 @@
 > client will do X"; §7.1 records what actually exists today, which is very little. >
 > **Disambiguation.** The feature sub-IDs in this branch (I1 TUI, I2 Quickshell, I3 CalDAV
 > Scheduling, I4 broader packaging) collide numerically with the Lens 3 criteria in
-> `gauntlet-output/criteria.md` (I1 Lossless iCalendar, I2 Sync authority, I3
+> `docs/specs/QUALITY-CRITERIA.md` (I1 Lossless iCalendar, I2 Sync authority, I3
 > Conflict/deletion, I4 Scope/network). Throughout this spec, criteria are always written
 > **"Lens-3 I*n*"** and features are always written **"feature I*n*"**. §6.4 uses the Lens-3
 > form exclusively.
@@ -568,7 +568,7 @@ Third-party *code* dependencies are `ratatui` and `crossterm` (both MIT, feature
 
 ### 6.4 Regulatory alignment
 
-Walked by name against `gauntlet-output/criteria.md` Lens 3. (Lens-3 numbering, not feature numbering — see the disambiguation note at the top.)
+Walked by name against `docs/specs/QUALITY-CRITERIA.md` Lens 3. (Lens-3 numbering, not feature numbering — see the disambiguation note at the top.)
 
 **Lens-3 I1 — Lossless iCalendar. Addressed at the client boundary; codec remains F's.** Neither client parses, serializes, normalizes, indexes, or logs iCalendar. Feature I1 reads only typed fields plus identity through `AgendaQueryPort`, and its mutations go through the same application use cases the CLI uses, which carry F's residual store and `event_calendar_users` rows unchanged. The binding test is `tui_mutations_produce_the_same_audit_record_as_the_cli` extended with a residual-digest assertion: run a full scripted TUI editing session over the synthetic `.ics` corpus and require every residual entry's `sha256`, ordinal, folding metadata, and calendar-user `raw_line` to be byte-identical before and after. Feature I3 is where losslessness matters most and it is **deferred**: the architecture note is that deferral is only safe because the RFC 6638 carriers — `SCHEDULE-AGENT`, `SCHEDULE-STATUS`, `SCHEDULE-FORCE-SEND`, `PARTSTAT`, `RSVP`, `DELEGATED-TO`/`-FROM`, `SENT-BY`, `MEMBER`, plus `METHOD`, `REQUEST-STATUS`, and whole `VFREEBUSY` components — are preserved verbatim *now* by F (§4.2 above makes that a binding requirement on F, not an aspiration). `scheduling_is_not_implemented_and_sends_nothing` proves the round trip today, so scheduling can be added later without having destroyed its inputs.
 

@@ -633,7 +633,7 @@ Any silent data loss, unconfirmed overwrite, UID instability, recurrence corrupt
 
 ### 7.1 What exists today
 
-**Implemented foundation only:** `src/domain.rs` defines typed calendar/event/reminder UUID identities; `src/lib.rs` defines version-1 success/error envelopes and foundation error exits; `migrations/0001_foundation.sql` scaffolds calendars, mutually exclusive timed/all-day events, RFC UID, metadata columns, extension JSON, reminders, delivery ledger, audit, and separate local/remote deletion timestamps. Foundation configuration, PostgreSQL migration, doctor/init, and isolated tests are described in `gauntlet-output/specs/a-foundation.md`.
+**Implemented foundation only:** `src/domain.rs` defines typed calendar/event/reminder UUID identities; `src/lib.rs` defines version-1 success/error envelopes and foundation error exits; `migrations/0001_foundation.sql` scaffolds calendars, mutually exclusive timed/all-day events, RFC UID, metadata columns, extension JSON, reminders, delivery ledger, audit, and separate local/remote deletion timestamps. Foundation configuration, PostgreSQL migration, doctor/init, and isolated tests are described in `docs/specs/a-foundation.md`.
 
 **Absent:** calendar/event application use cases, prompts/flags, event renderers/JSON DTOs, system-timezone semantics, revisions/concurrency handling, calendar lifecycle commands, metadata child structures, recurrence parsing/expansion, exceptions/splits, event reminder CRUD, projections, functional audit mutation recording, UID reservation after purge, and all B tests. Foundation columns are scaffolding and are not evidence that B behavior exists.
 

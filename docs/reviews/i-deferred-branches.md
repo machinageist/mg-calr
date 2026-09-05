@@ -1,8 +1,8 @@
 # Scorecard: Later Branches — Approved but Deferred (TUI, Quickshell, CalDAV Scheduling, Broader Packaging)
 
 **Feature ID:** i-deferred-branches
-**Spec file:** gauntlet-output/specs/i-deferred-branches.md
-**Reviewer agent:** Spec Gauntlet verification agent (blind review, branch I)
+**Spec file:** docs/specs/i-deferred-branches.md
+**Reviewer agent:** Verification agent, branch I (blind review)
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 1
 **Graded against commit:** `6e855f9` (working tree has uncommitted concurrent edits to `Cargo.toml`, `src/{application,interop,lib,main,storage,tui}.rs`, and four test files; §7.1's claims were checked against `git show HEAD:` content, which is what the spec itself names)

@@ -1,8 +1,8 @@
 # Scorecard: Todo Core and Graph
 
 **Feature ID:** c-todo-core
-**Spec file:** gauntlet-output/specs/c-todo-core.md
-**Reviewer agent:** blind verification agent (Spec Gauntlet)
+**Spec file:** docs/specs/c-todo-core.md
+**Reviewer agent:** blind verification agent
 **Date:** 2026-08-30
 **Spec iteration reviewed:** 1
 
@@ -92,7 +92,7 @@ Auto-fail rules walked individually:
 
 ## Feasibility Check
 
-Source read before completing this table: `src/domain/todo.rs`, `src/domain.rs`, `src/storage.rs`, `src/application.rs`, `src/main.rs`, `src/interop.rs`, `tests/todo_core.rs`, `tests/todo_projection_contract.rs`, `migrations/0001_foundation.sql`, `0002_todo_core.sql`, `0003_todo_recurrence.sql`, `0004_todo_reminders.sql`, `0006_repair_todo_recurrence.sql`, `Cargo.toml`, `Cargo.lock`, `gauntlet-output/feature-tree.md`.
+Source read before completing this table: `src/domain/todo.rs`, `src/domain.rs`, `src/storage.rs`, `src/application.rs`, `src/main.rs`, `src/interop.rs`, `tests/todo_core.rs`, `tests/todo_projection_contract.rs`, `migrations/0001_foundation.sql`, `0002_todo_core.sql`, `0003_todo_recurrence.sql`, `0004_todo_reminders.sql`, `0006_repair_todo_recurrence.sql`, `Cargo.toml`, `Cargo.lock`, `docs/FEATURE-TREE.md`.
 
 | Check | Status | Notes |
 |---|---|---|
