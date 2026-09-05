@@ -13,10 +13,10 @@ fn snapshot() -> Snapshot {
         interop_schema: "mg.interop/1".to_owned(),
         kind: "snapshot".to_owned(),
         producer: Producer {
-            app: "mg-todo".to_owned(),
+            app: "mg-remindr".to_owned(),
             app_version: "0.1.0".to_owned(),
         },
-        export_id: "mg-todo:snapshot:fixture".to_owned(),
+        export_id: "mg-remindr:snapshot:fixture".to_owned(),
         created_at: observed_at,
         source_revision: "authoritative-revision-7".to_owned(),
         producer_revision: 7,
@@ -26,9 +26,9 @@ fn snapshot() -> Snapshot {
             expected_links: 0,
         },
         records: vec![Record {
-            global_id: "mg-todo:todo:todo-1".to_owned(),
+            global_id: "mg-remindr:todo:todo-1".to_owned(),
             origin: Origin {
-                app: "mg-todo".to_owned(),
+                app: "mg-remindr".to_owned(),
                 kind: "todo".to_owned(),
                 local_id: "todo-1".to_owned(),
             },
@@ -52,11 +52,11 @@ fn snapshot() -> Snapshot {
             }),
         }],
         links: vec![],
-        provenance: vec!["mg-todo"]
+        provenance: vec!["mg-remindr"]
             .into_iter()
             .map(|source| mg_calr::interop::Provenance {
                 source: source.to_owned(),
-                boundary: "mg-todo export".to_owned(),
+                boundary: "mg-remindr export".to_owned(),
             })
             .collect(),
         diagnostics: vec![Diagnostic {
@@ -71,7 +71,7 @@ fn snapshot() -> Snapshot {
 fn validates_mg_todo_only_and_preserves_lossless_payload_metadata() {
     let projection = TodoProjectionSnapshot::validate(snapshot()).unwrap();
     let record = &projection.snapshot().records[0];
-    assert_eq!(record.global_id, "mg-todo:todo:todo-1");
+    assert_eq!(record.global_id, "mg-remindr:todo:todo-1");
     assert_eq!(record.revision, 7);
     assert_eq!(record.payload["reminders"][0]["minutes_before"], 30);
     assert_eq!(projection.snapshot().diagnostics[0].code, "fresh");
@@ -137,11 +137,11 @@ fn store_load_and_revision_are_deterministic() {
 fn rejects_relationships_with_missing_endpoints() {
     let mut value = snapshot();
     value.links.push(Link {
-        link_id: "mg-todo:todo:todo-1--todo_parent--mg-todo:todo:missing".to_owned(),
-        source_global_id: "mg-todo:todo:todo-1".to_owned(),
-        target_global_id: "mg-todo:todo:missing".to_owned(),
+        link_id: "mg-remindr:todo:todo-1--todo_parent--mg-remindr:todo:missing".to_owned(),
+        source_global_id: "mg-remindr:todo:todo-1".to_owned(),
+        target_global_id: "mg-remindr:todo:missing".to_owned(),
         relation: "todo_parent".to_owned(),
-        created_by: "mg-todo".to_owned(),
+        created_by: "mg-remindr".to_owned(),
         created_at: None,
         provenance: "exported relationship".to_owned(),
     });
@@ -155,16 +155,16 @@ fn rejects_relationships_with_missing_endpoints() {
 #[test]
 fn rejects_noncanonical_identity_and_relationship_metadata() {
     let mut value = snapshot();
-    value.records[0].global_id = "mg-todo:project:todo-1".to_owned();
+    value.records[0].global_id = "mg-remindr:project:todo-1".to_owned();
     assert!(
         matches!(TodoProjectionSnapshot::validate(value), Err(ProjectionError::Invalid(message)) if message.contains("global_id"))
     );
 
     let mut value = snapshot();
     value.links.push(Link {
-        link_id: "mg-todo:todo:todo-1--todo_tagged--mg-todo:todo:todo-1".to_owned(),
-        source_global_id: "mg-todo:todo:todo-1".to_owned(),
-        target_global_id: "mg-todo:todo:todo-1".to_owned(),
+        link_id: "mg-remindr:todo:todo-1--todo_tagged--mg-remindr:todo:todo-1".to_owned(),
+        source_global_id: "mg-remindr:todo:todo-1".to_owned(),
+        target_global_id: "mg-remindr:todo:todo-1".to_owned(),
         relation: "todo_tagged".to_owned(),
         created_by: "other".to_owned(),
         created_at: None,
@@ -220,11 +220,11 @@ fn rejects_purged_present_records() {
 fn rejects_self_links_and_cycles_in_todo_graphs() {
     let mut self_link = snapshot();
     self_link.links.push(Link {
-        link_id: "mg-todo:todo:todo-1--todo_parent--mg-todo:todo:todo-1".to_owned(),
-        source_global_id: "mg-todo:todo:todo-1".to_owned(),
-        target_global_id: "mg-todo:todo:todo-1".to_owned(),
+        link_id: "mg-remindr:todo:todo-1--todo_parent--mg-remindr:todo:todo-1".to_owned(),
+        source_global_id: "mg-remindr:todo:todo-1".to_owned(),
+        target_global_id: "mg-remindr:todo:todo-1".to_owned(),
         relation: "todo_parent".to_owned(),
-        created_by: "mg-todo".to_owned(),
+        created_by: "mg-remindr".to_owned(),
         created_at: None,
         provenance: "fixture".to_owned(),
     });
@@ -235,16 +235,16 @@ fn rejects_self_links_and_cycles_in_todo_graphs() {
 
     let mut cycle = snapshot();
     let mut second = cycle.records[0].clone();
-    second.global_id = "mg-todo:todo:todo-2".to_owned();
+    second.global_id = "mg-remindr:todo:todo-2".to_owned();
     second.origin.local_id = "todo-2".to_owned();
     cycle.records.push(second);
     for (source, target) in [("todo-1", "todo-2"), ("todo-2", "todo-1")] {
         cycle.links.push(Link {
-            link_id: format!("mg-todo:todo:{source}--todo_depends_on--mg-todo:todo:{target}"),
-            source_global_id: format!("mg-todo:todo:{source}"),
-            target_global_id: format!("mg-todo:todo:{target}"),
+            link_id: format!("mg-remindr:todo:{source}--todo_depends_on--mg-remindr:todo:{target}"),
+            source_global_id: format!("mg-remindr:todo:{source}"),
+            target_global_id: format!("mg-remindr:todo:{target}"),
             relation: "todo_depends_on".to_owned(),
-            created_by: "mg-todo".to_owned(),
+            created_by: "mg-remindr".to_owned(),
             created_at: None,
             provenance: "fixture".to_owned(),
         });

@@ -20,7 +20,7 @@ Verified on 2026-09-04 against the live `mg_calr` database at baseline `c22fb3a`
   showing one occurrence while claiming a repeating series.
 - Todos already recur. `RecurrenceRule` in `src/domain/todo.rs` carries frequency,
   interval, count and until, and `expand_due_instances_indexed` walks it. That
-  type is part of the `mg-todo` projection payload contract, so it is not free to
+  type is part of the `mg-remindr` projection payload contract, so it is not free to
   change, and it cannot express a weekday set.
 - The source files need a weekday set: `daily-skeleton.ics` repeats on
   `BYDAY=MO,TU,WE,TH,FR,SA`, which no existing rule in this repository can state.
@@ -36,7 +36,7 @@ count, until and an optional weekday set, and expand it into concrete occurrence
 inside a bounded window without mutating the stored event.
 
 The rule is separate from the todo rule on purpose. The todo rule is a
-cross-application contract with `mg-todo`; the event rule is `mg-calr`'s own, and
+cross-application contract with `mg-remindr`; the event rule is `mg-calr`'s own, and
 only events need a weekday set.
 
 ### Slice 2: recurring events on the agenda
@@ -92,4 +92,4 @@ with a full schedule.
 - Editing or cancelling a single occurrence of a series.
 - Alarms, attendees, organizers, and free/busy publishing.
 - Writing iCalendar out, vdirsyncer, or any network synchronization.
-- Changing the `mg-todo` projection contract or its `RecurrenceRule`.
+- Changing the `mg-remindr` projection contract or its `RecurrenceRule`.

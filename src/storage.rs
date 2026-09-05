@@ -2345,7 +2345,7 @@ impl crate::application::AsyncCalendarEventRepository for PostgresCalendarEventR
 }
 
 /// Read-only agenda boundary that keeps events in PostgreSQL and todos in the
-/// validated immutable mg-todo projection.
+/// validated immutable mg-remindr projection.
 pub struct ProjectionAgendaRepository {
     events: PostgresCalendarEventRepository,
     todo_projection: PathBuf,

@@ -127,7 +127,7 @@ Binding grammar rules:
 
 1. Parse flags locally. Resolve configuration. Probe schema compatibility (§G5) before any other query; a pending or ahead schema stops here.
 2. Resolve the selector to an ordered set of aggregate IDs with current revisions. Refuse a selector matching zero items (`selector_empty`) and one exceeding `--limit` (default 5000, hard cap 50000) with `bulk_limit_exceeded`.
-3. Refuse any item owned by the stored todo projection with `projection_read_only`, naming the `mg-todo` command that owns it. `mg-calr` never mutates projected todos.
+3. Refuse any item owned by the stored todo projection with `projection_read_only`, naming the `mg-remindr` command that owns it. `mg-calr` never mutates projected todos.
 4. For each item, call the owning feature's *validation-only* patch path to compute the after-state. A recurring master or occurrence exception in the set requires an explicit `--scope`; otherwise `recurrence_scope_required`, no plan is stored.
 5. Persist the plan: `bulk_plans` row plus one `bulk_plan_items` row per item, with `expires_at` (default 15 minutes, configurable), status `open`, and a fingerprint = SHA-256 over the canonical JSON array of sorted `(entity_type, entity_id, expected_revision, action, after_state_digest)` tuples.
 6. Render the diff (§3.3) and the exact apply command including plan ID and fingerprint. Exit 0. **Nothing has been mutated.**
@@ -227,7 +227,7 @@ N/A for view transitions — commands print synchronously and replace nothing. T
 | destructive command under `--no-input` without `--yes` | `confirmation_required`, exit 64, names required flags | pass `--yes` (and any acknowledgement) after reading the plan | none |
 | purge plan without `--acknowledge-irreversible` | `confirmation_required`, exit 64 | acknowledge explicitly | none |
 | recurring master in a scopeless plan | `recurrence_scope_required`, exit 65 | pass `--scope`, re-plan | none; plan not stored |
-| selector matches projected todos | `projection_read_only`, exit 65, names the `mg-todo` command | mutate in the owning app, re-import projection | none |
+| selector matches projected todos | `projection_read_only`, exit 65, names the `mg-remindr` command | mutate in the owning app, re-import projection | none |
 | plan exceeds limit | `bulk_limit_exceeded`, exit 65 with count and cap | narrow the selector or raise `--limit` deliberately | none |
 | undo target changed since | `undo_stale`, exit 75, names intervening transaction | inspect `history show`, re-decide | none |
 | undo target purged | `undo_irreversible`, exit 65 | restore from a backup archive instead | none from undo |
@@ -703,7 +703,7 @@ The auto-fail rules, addressed by name: **silent event/todo loss** is unreachabl
 - No blanket undo, no "restore to timestamp", no `--force` that bypasses a fingerprint, revision, or integrity check.
 - No repair inside `doctor`, ever — including a "safe" fix, a cache rebuild, or ledger creation.
 - No privileged operation: mg-calr never runs sudo, never creates or drops a role or database, and never edits `pg_hba.conf`.
-- No mutation of the stored todo projection; that authority belongs to `mg-todo`.
+- No mutation of the stored todo projection; that authority belongs to `mg-remindr`.
 - No GUI, TUI, or Quickshell surface for any G command in this feature; later clients consume the public JSON contracts.
 
 ---

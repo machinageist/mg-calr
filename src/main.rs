@@ -80,9 +80,9 @@ struct InteropArgs {
 enum InteropCommand {
     /// Export calendars, events, projects, tags, todos, and relationships.
     Export,
-    /// Import and validate an immutable mg-todo projection snapshot.
+    /// Import and validate an immutable mg-remindr projection snapshot.
     ImportTodo {
-        /// JSON envelope exported by mg-todo.
+        /// JSON envelope exported by mg-remindr.
         #[arg(long)]
         input: PathBuf,
         /// Local projection file replaced atomically after validation.
@@ -94,7 +94,7 @@ enum InteropCommand {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct AgendaArgs {
-    /// Imported mg-todo projection; defaults under the mg-calr XDG data directory.
+    /// Imported mg-remindr projection; defaults under the mg-calr XDG data directory.
     #[arg(long, value_name = "FILE")]
     todo_projection: Option<PathBuf>,
     /// Inclusive first civil date in the query window.
@@ -119,7 +119,7 @@ struct AgendaArgs {
 
 #[derive(Debug, Args)]
 struct TuiArgs {
-    /// Imported mg-todo projection; defaults under the mg-calr XDG data directory.
+    /// Imported mg-remindr projection; defaults under the mg-calr XDG data directory.
     #[arg(long, value_name = "FILE")]
     todo_projection: Option<PathBuf>,
     /// Inclusive first civil date; defaults to today in UTC.
@@ -1288,7 +1288,7 @@ fn run_todo_projection_import(
             })
         );
     } else {
-        println!("imported mg-todo projection revision {revision}");
+        println!("imported mg-remindr projection revision {revision}");
     }
     Ok(())
 }

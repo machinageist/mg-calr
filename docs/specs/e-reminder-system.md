@@ -230,7 +230,7 @@ Authority boundaries are binding even if the package stays flat: `domain` is pur
 /// constructor, so a delivery cannot be written without full identity.
 pub struct DeliveryKey {
     /// Interop-style global reference: `mg-calr:reminder:<uuid>` or
-    /// `mg-todo:reminder:<local-id>` (same grammar as `interop::Snapshot` global IDs).
+    /// `mg-remindr:reminder:<local-id>` (same grammar as `interop::Snapshot` global IDs).
     pub schedule_ref: ScheduleRef,
     /// `singleton` for a non-recurring item, otherwise the B7/C4 occurrence identity.
     pub occurrence_key: OccurrenceKey,
@@ -312,7 +312,7 @@ pub async fn list_deliveries(&self, filter: DeliveryFilter)  -> Result<Vec<Deliv
 pub async fn revoke_orphans(&self, now: DateTime<Utc>)       -> Result<RevokeReport, ReminderError>;
 ```
 
-**Schedule sources** — the read side that keeps E honest about the mg-todo extraction described in `README.md`:
+**Schedule sources** — the read side that keeps E honest about the mg-remindr extraction described in `README.md`:
 
 ```rust
 pub trait ReminderScheduleSource {
@@ -323,7 +323,7 @@ pub trait ReminderScheduleSource {
 }
 ```
 
-Implementations: `PostgresEventSchedules` (B8 `reminders` rows joined to live events — authoritative), `ProjectionTodoSchedules` (read-only over the validated `interop::TodoProjectionSnapshot`, reusing its freshness/conflict errors), and `LegacyPostgresTodoSchedules` (today's `storage::scan_reminders` path, gated behind `--source todo-legacy` and removed when the mg-todo migration completes).
+Implementations: `PostgresEventSchedules` (B8 `reminders` rows joined to live events — authoritative), `ProjectionTodoSchedules` (read-only over the validated `interop::TodoProjectionSnapshot`, reusing its freshness/conflict errors), and `LegacyPostgresTodoSchedules` (today's `storage::scan_reminders` path, gated behind `--source todo-legacy` and removed when the mg-remindr migration completes).
 
 **E7 backend abstraction:**
 
@@ -708,7 +708,7 @@ Any design permitting duplicate reminder delivery, a non-idempotent scan, a pres
 - **Implemented — identity and contracts.** `src/domain.rs` defines `ReminderId` and `DeliveryId` (UUIDv7, typed, non-substitutable). `src/lib.rs` defines the versioned success/error envelopes, `reminder_invalid` code, and exit-code table. `src/domain/todo.rs` defines `TodoReminder` with offset validation and duplicate rejection (`tests/todo_core.rs::reminders_validate_due_offsets_and_deduplicate`).
 - **Prototyped — scan only.** `src/storage.rs::scan_reminders` expands todo occurrences, filters completed/trashed/blocked todos, sorts candidates deterministically, upserts `reminders` rows, and inserts `reminder_deliveries` with `ON CONFLICT (reminder_id, scheduled_for) DO NOTHING`, returning `status` of `recorded` / `already_recorded` / `would_record` and a hard-coded `transport: "none"`. `--dry-run` rolls back. `src/storage.rs::due_reminders` returns due todo reminders with a hard-coded 09:00 default for date-only todos. Exposed as `mg-calr todo scan-reminders --at --dry-run` (`src/main.rs`), asserted only at the help level by `tests/cli_contract.rs::reminder_scan_contract_is_explicitly_dry_run_capable`.
 - **Absent — everything that delivers.** No notification backend, no D-Bus code, no daemon, no claim/lease/state machine, no channel or occurrence key in the ledger, no snooze/dismiss/DND/catch-up, no action service, no systemd units, no scanner singleton, no crash recovery, no event-sourced schedules (`scan_reminders` reads todos only), and no reminder tests beyond the help assertion. `README.md` lists "Reminder delivery/service actions" under remaining scope.
-- **Gated — todo authority.** `README.md` and `src/interop.rs` record that todo ownership is moving to a separate `mg-todo` application: agenda reads come from a validated `mg.interop/1` projection, while the legacy todo tables remain "for migration compatibility" and are no longer an agenda read authority. E must therefore treat the projection as the forward todo schedule source and the legacy tables as a gated migration path.
+- **Gated — todo authority.** `README.md` and `src/interop.rs` record that todo ownership is moving to a separate `mg-remindr` application: agenda reads come from a validated `mg.interop/1` projection, while the legacy todo tables remain "for migration compatibility" and are no longer an agenda read authority. E must therefore treat the projection as the forward todo schedule source and the legacy tables as a gated migration path.
 - **Planned — sibling contracts.** `docs/specs/b-event-calendar-core.md` (B8 reminder definitions, `ReminderInstanceKey`, and an explicit prohibition on B claiming/delivering), `docs/specs/c-todo-core.md` (`eligible_todo_reminders`, suppression for blocked/completed/trashed), and `docs/specs/d-views-query-output.md` (observational `--has-reminder` gated on E's durable uniqueness contract).
 
 ### 7.2 Delta to spec
@@ -727,7 +727,7 @@ Any design permitting duplicate reminder delivery, a non-idempotent scan, a pres
 
 - **A1–A5** must remain stable: configuration precedence, migration runner and advisory-lock discipline, typed IDs, error/JSON envelopes, and audit transaction semantics.
 - **B8** must supply immutable event reminder definitions and, for recurring events, a stable `ReminderInstanceKey`/occurrence identity. Until B6/B7 recurrence lands, E delivers singleton and non-recurring event reminders; recurring event occurrence keys are gated on that work.
-- **C8** must supply `eligible_todo_reminders`-equivalent suppression (completed/trashed/blocked) and `todo.date_reminder_time` semantics. During the mg-todo extraction, the `mg.interop/1` projection must expose reminder schedules with stable local IDs and revisions; until it does, the legacy source stays gated behind `--source todo-legacy`.
+- **C8** must supply `eligible_todo_reminders`-equivalent suppression (completed/trashed/blocked) and `todo.date_reminder_time` semantics. During the mg-remindr extraction, the `mg.interop/1` projection must expose reminder schedules with stable local IDs and revisions; until it does, the legacy source stays gated behind `--source todo-legacy`.
 - **B4 temporal policy** (IANA zone, gap/fold) blocks correct trigger derivation and DND quiet-hours evaluation.
 - **Backend evidence spike (Q1)** must select the D-Bus client and prove action/close signal handling on mako, dunst, and swaync before the freedesktop backend leaves the gate.
 - **G3/G5** own delivery-ledger retention/pruning and migration rollback policy; **G6** owns broader crash-recovery runbooks. E guarantees its own atomic writes and restart semantics regardless.
@@ -751,7 +751,7 @@ Any design permitting duplicate reminder delivery, a non-idempotent scan, a pres
 - **Q2:** Should `recovery.represent_unconfirmed` default to `never` (at-most-once; a crashed presentation is recorded but never re-shown) as specified, or to `once` with an explicit `Recovered:` label? The spec locks `never` because duplicate delivery is an auto-fail and a missed delivery is recorded and discoverable — confirm this is the intended tradeoff. — blocks: default configuration value, not the mechanism.
 - **Q3:** What are the user's preferred catch-up defaults (`present_within = 1h`, `fold_within = 24h`, `expire_after = 24h`, `max_burst = 5`)? — blocks: shipped defaults only; the classification model and its idempotency are fixed.
 - **Q4:** Should `dnd.follow_backend_inhibit` be enabled by default where the notification daemon implements the 1.3 `Inhibited` property, given that mako and dunst express DND through their own mechanisms rather than that property? — blocks: E6 default; manual windows and configured quiet hours are authoritative regardless.
-- **Q5:** When does the `mg-todo` extraction finish, i.e. when can `LegacyPostgresTodoSchedules` and `todo scan-reminders` be removed rather than merely deprecated? — blocks: removal timing and the deprecation notice wording, not the source abstraction.
+- **Q5:** When does the `mg-remindr` extraction finish, i.e. when can `LegacyPostgresTodoSchedules` and `todo scan-reminders` be removed rather than merely deprecated? — blocks: removal timing and the deprecation notice wording, not the source abstraction.
 - **Q6:** Should a delivery whose item was completed or trashed *after* presentation but *before* the user acted have its bubble closed automatically (current spec: yes, `revoked` + `CloseNotification`), or should it remain visible for context? — blocks: §3.2 revocation UX detail only.
 - **Q7:** Are the fencing/lease defaults right for this workstation — `lease = 120s`, `backend_reply_timeout = 25s`, heartbeat at `lease / 4`, and proof-of-death at `2 × lease` of missed heartbeats? A shorter lease sweeps a killed oneshot sooner; a longer one is more forgiving of a slow notification daemon. The **mechanism** is fixed by §4.2 invariant 7 and §4.6 regardless — an expired lease alone never reconciles — so this blocks shipped defaults only, not correctness.
 - **Q8:** Should a `BackendError::UnknownOutcome` be surfaced to the user immediately (a one-line stderr note from `remind run --foreground`, or a single low-urgency "a reminder may have been missed" bubble at most once per hour), or left to `remind list`/`remind doctor` as the spec currently has it? Presenting anything here risks becoming the duplicate we just eliminated, so the spec's default is silence-plus-ledger. — blocks: §3.6 presentation detail only.

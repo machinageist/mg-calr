@@ -12,7 +12,7 @@ use mg_calr::{
 
 fn key(second: u32) -> DeliveryKey {
     DeliveryKey::new(
-        ScheduleRef::new("mg-todo:reminder:fixture").unwrap(),
+        ScheduleRef::new("mg-remindr:reminder:fixture").unwrap(),
         OccurrenceKey::singleton(),
         Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, second)
             .single()
@@ -42,7 +42,7 @@ fn delivery_key_is_total_ordered_and_namespaced() {
     assert!(key(1) < key(2));
     assert_eq!(
         serde_json::to_value(key(1)).unwrap()["schedule_ref"],
-        "mg-todo:reminder:fixture"
+        "mg-remindr:reminder:fixture"
     );
 }
 

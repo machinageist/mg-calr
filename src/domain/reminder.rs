@@ -42,7 +42,7 @@ impl ScheduleRef {
     pub fn new(value: impl Into<String>) -> Result<Self, ReminderDomainError> {
         let value = value.into();
         let valid_prefix =
-            value.starts_with("mg-calr:reminder:") || value.starts_with("mg-todo:reminder:");
+            value.starts_with("mg-calr:reminder:") || value.starts_with("mg-remindr:reminder:");
         if !valid_prefix || value.ends_with(':') || value.chars().any(char::is_whitespace) {
             return Err(ReminderDomainError::InvalidScheduleRef);
         }
@@ -141,7 +141,7 @@ pub fn plan_deliveries(schedules: impl IntoIterator<Item = ScheduledReminder>) -
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderDomainError {
-    #[error("schedule reference must use the mg-calr or mg-todo reminder namespace")]
+    #[error("schedule reference must use the mg-calr or mg-remindr reminder namespace")]
     InvalidScheduleRef,
     #[error("occurrence key must be non-empty and contain no whitespace")]
     InvalidOccurrenceKey,

@@ -21,10 +21,10 @@ fn projection_with(todos: &[Todo], links: Vec<Link>) -> TodoProjectionSnapshot {
         interop_schema: "mg.interop/1".to_owned(),
         kind: "snapshot".to_owned(),
         producer: Producer {
-            app: "mg-todo".to_owned(),
+            app: "mg-remindr".to_owned(),
             app_version: "0.1.0".to_owned(),
         },
-        export_id: "mg-todo:snapshot:agenda-fixture".to_owned(),
+        export_id: "mg-remindr:snapshot:agenda-fixture".to_owned(),
         created_at,
         source_revision: "agenda-revision-1".to_owned(),
         producer_revision: 1,
@@ -36,9 +36,9 @@ fn projection_with(todos: &[Todo], links: Vec<Link>) -> TodoProjectionSnapshot {
         records: todos
             .iter()
             .map(|todo| Record {
-                global_id: format!("mg-todo:todo:{}", todo.id),
+                global_id: format!("mg-remindr:todo:{}", todo.id),
                 origin: Origin {
-                    app: "mg-todo".to_owned(),
+                    app: "mg-remindr".to_owned(),
                     kind: "todo".to_owned(),
                     local_id: todo.id.to_string(),
                 },
@@ -67,14 +67,14 @@ fn projection_with(todos: &[Todo], links: Vec<Link>) -> TodoProjectionSnapshot {
 }
 
 fn dependency_link(dependent: &Todo, prerequisite: &Todo) -> Link {
-    let source = format!("mg-todo:todo:{}", dependent.id);
-    let target = format!("mg-todo:todo:{}", prerequisite.id);
+    let source = format!("mg-remindr:todo:{}", dependent.id);
+    let target = format!("mg-remindr:todo:{}", prerequisite.id);
     Link {
         link_id: format!("{source}--todo_depends_on--{target}"),
         source_global_id: source,
         target_global_id: target,
         relation: "todo_depends_on".to_owned(),
-        created_by: "mg-todo".to_owned(),
+        created_by: "mg-remindr".to_owned(),
         created_at: None,
         provenance: "fixture".to_owned(),
     }

@@ -42,8 +42,8 @@ fn todo_projection_import_bypasses_database_config_and_hides_store_path() {
         r#"{
           "interop_schema":"mg.interop/1",
           "kind":"snapshot",
-          "producer":{"app":"mg-todo","app_version":"0.1.0"},
-          "export_id":"mg-todo:snapshot:test",
+          "producer":{"app":"mg-remindr","app_version":"0.1.0"},
+          "export_id":"mg-remindr:snapshot:test",
           "created_at":"2026-08-24T12:00:00Z",
           "source_revision":"revision-1",
           "producer_revision":1,
@@ -219,7 +219,7 @@ fn agenda_reports_missing_projection_before_calendar_database_failure() {
         .failure()
         .code(74)
         .stderr(predicate::eq(
-            "mg-calr: the imported mg-todo projection is missing\n",
+            "mg-calr: the imported mg-remindr projection is missing\n",
         ))
         .stderr(predicate::str::contains(missing.to_string_lossy().as_ref()).not());
 }

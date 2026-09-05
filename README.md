@@ -1,6 +1,6 @@
 # mg-calr
 
-`mg-calr` is a keyboard-first Rust calendar application for a local Linux workstation. PostgreSQL is authoritative for calendars and events. Todo ownership is being extracted to the separate `mg-todo` application; `mg-calr` can validate and atomically store an immutable `mg.interop/1` projection without connecting to the `mg-todo` database.
+`mg-calr` is a keyboard-first Rust calendar application for a local Linux workstation. PostgreSQL is authoritative for calendars and events. Todo ownership is being extracted to the separate `mg-remindr` application; `mg-calr` can validate and atomically store an immutable `mg.interop/1` projection without connecting to the `mg-remindr` database.
 
 ## Implemented surface
 
@@ -16,13 +16,13 @@ The current incremental implementation includes:
   time rather than stored per day;
 - an iCalendar reader that imports `VEVENT` records and refuses by name any RRULE
   part this application cannot represent;
-- legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-todo` migration period;
+- legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-remindr` migration period;
 - calendar/event JSON interchange and read-only `mg.interop/1` snapshot export;
-- validated `mg-todo` projection import with canonical identity, lifecycle, relationship, graph, revision, freshness-order, bounded-input, and conflict checks; and
+- validated `mg-remindr` projection import with canonical identity, lifecycle, relationship, graph, revision, freshness-order, bounded-input, and conflict checks; and
 - crash-safe projection replacement using interprocess advisory locking, atomic rename, file sync, and parent-directory sync.
 
 Only todos carrying a due value appear on a day agenda, and completed ones are hidden
-unless `--include-completed` is passed. `mg-todo` is the producer of that projection;
+unless `--include-completed` is passed. `mg-remindr` is the producer of that projection;
 see its README for how a reminder is kept and refreshed into the calendar.
 
 Run `mg-calr --help` and the relevant subcommand help for the complete current command inventory. Add `--json` where machine-readable output is supported. `--no-input`, `--no-color`, and `NO_COLOR` are supported at their documented boundaries.
@@ -33,11 +33,11 @@ Projection refresh is explicit and projection-only:
 
 ```bash
 mg-calr interop import-todo \
-  --input /path/to/mg-todo-snapshot.json \
+  --input /path/to/mg-remindr-snapshot.json \
   --store /path/to/mg-calr-todo-projection.json
 ```
 
-The import validates the complete envelope before replacement, rejects stale or conflicting revisions, and never opens an `mg-todo` database connection. Combined agenda and TUI reads keep calendar/event authority in the mg-calr PostgreSQL database, but read todos only from the validated stored projection. By default they load `$XDG_DATA_HOME/mg-calr/todo-projection.json` (or `~/.local/share/mg-calr/todo-projection.json`); `--todo-projection FILE` selects an explicit imported store. Missing, stale, conflicting, and invalid projections fail closed with distinct diagnostics rather than falling back to legacy todo tables. The existing mg-calr todo schema and commands remain in place for migration compatibility, but they are no longer an agenda read authority.
+The import validates the complete envelope before replacement, rejects stale or conflicting revisions, and never opens an `mg-remindr` database connection. Combined agenda and TUI reads keep calendar/event authority in the mg-calr PostgreSQL database, but read todos only from the validated stored projection. By default they load `$XDG_DATA_HOME/mg-calr/todo-projection.json` (or `~/.local/share/mg-calr/todo-projection.json`); `--todo-projection FILE` selects an explicit imported store. Missing, stale, conflicting, and invalid projections fail closed with distinct diagnostics rather than falling back to legacy todo tables. The existing mg-calr todo schema and commands remain in place for migration compatibility, but they are no longer an agenda read authority.
 
 ## Configuration
 

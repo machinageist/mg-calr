@@ -21,14 +21,14 @@ use crate::storage::{StorageError, export_snapshot_sources};
 
 const INTEROP_SCHEMA: &str = "mg.interop/1";
 const PRODUCER_APP: &str = "mg-calr";
-const TODO_PRODUCER_APP: &str = "mg-todo";
+const TODO_PRODUCER_APP: &str = "mg-remindr";
 const MAX_PROJECTION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROJECTION_RECORDS: usize = 100_000;
 const MAX_PROJECTION_LINKS: usize = 500_000;
 const MAX_AGENDA_PROJECTION_AGE: TimeDelta = TimeDelta::hours(24);
 const MAX_IMPORT_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 
-/// A validated, immutable mg-todo snapshot held by mg-calr.
+/// A validated, immutable mg-remindr snapshot held by mg-calr.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoProjectionSnapshot {
     snapshot: Snapshot,
@@ -37,13 +37,13 @@ pub struct TodoProjectionSnapshot {
 /// Errors returned before any projection file is replaced.
 #[derive(Debug, Error)]
 pub enum ProjectionError {
-    #[error("the imported mg-todo projection is missing")]
+    #[error("the imported mg-remindr projection is missing")]
     Missing,
-    #[error("stale mg-todo projection: {0}")]
+    #[error("stale mg-remindr projection: {0}")]
     Stale(String),
-    #[error("conflicting mg-todo projection: {0}")]
+    #[error("conflicting mg-remindr projection: {0}")]
     Conflict(String),
-    #[error("incomplete mg-todo projection: {0}")]
+    #[error("incomplete mg-remindr projection: {0}")]
     Incomplete(String),
     #[error("could not read projection snapshot: {0}")]
     Read(#[source] std::io::Error),
@@ -51,7 +51,7 @@ pub enum ProjectionError {
     Write(#[source] std::io::Error),
     #[error("projection snapshot JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("invalid mg-todo projection: {0}")]
+    #[error("invalid mg-remindr projection: {0}")]
     Invalid(String),
 }
 
@@ -186,7 +186,7 @@ impl TodoProjectionSnapshot {
                     let todo = todo_index(&todo_indexes, &link.target_global_id)?;
                     let project = link
                         .source_global_id
-                        .strip_prefix("mg-todo:project:")
+                        .strip_prefix("mg-remindr:project:")
                         .ok_or_else(|| relationship_conflict(link))?
                         .parse::<ProjectId>()
                         .map_err(|_| relationship_conflict(link))?;
@@ -201,7 +201,7 @@ impl TodoProjectionSnapshot {
                     let todo = todo_index(&todo_indexes, &link.source_global_id)?;
                     let tag = link
                         .target_global_id
-                        .strip_prefix("mg-todo:tag:")
+                        .strip_prefix("mg-remindr:tag:")
                         .ok_or_else(|| relationship_conflict(link))?
                         .parse::<TagId>()
                         .map_err(|_| relationship_conflict(link))?;
@@ -228,7 +228,7 @@ impl TodoProjectionSnapshot {
                 || payload_tags != tags
             {
                 return Err(ProjectionError::Conflict(format!(
-                    "payload and relationship projection disagree for mg-todo:todo:{}",
+                    "payload and relationship projection disagree for mg-remindr:todo:{}",
                     todo.id
                 )));
             }
@@ -284,7 +284,7 @@ impl TodoProjectionSnapshot {
         }
     }
 
-    /// Parse and validate an mg-todo envelope without database access.
+    /// Parse and validate an mg-remindr envelope without database access.
     ///
     /// # Errors
     /// Returns an error for invalid JSON or a contract violation.
@@ -312,7 +312,7 @@ impl TodoProjectionSnapshot {
         }
         if snapshot.kind != "snapshot" || snapshot.producer.app != TODO_PRODUCER_APP {
             return Err(ProjectionError::Invalid(
-                "expected an mg-todo snapshot producer".to_owned(),
+                "expected an mg-remindr snapshot producer".to_owned(),
             ));
         }
         if snapshot.producer_revision == 0 {
@@ -348,7 +348,7 @@ impl TodoProjectionSnapshot {
             }
             if record.origin.app != TODO_PRODUCER_APP || record.origin.local_id.is_empty() {
                 return Err(ProjectionError::Invalid(
-                    "record origin must identify mg-todo and a local ID".to_owned(),
+                    "record origin must identify mg-remindr and a local ID".to_owned(),
                 ));
             }
             let expected_global_id = format!(
@@ -392,7 +392,7 @@ impl TodoProjectionSnapshot {
             }
             if link.created_by != TODO_PRODUCER_APP {
                 return Err(ProjectionError::Invalid(
-                    "relationship created_by must be mg-todo".to_owned(),
+                    "relationship created_by must be mg-remindr".to_owned(),
                 ));
             }
             if !relationship_allowed(
@@ -441,7 +441,7 @@ impl TodoProjectionSnapshot {
         hex_digest(&serde_json::to_vec(&self.snapshot).expect("snapshot is serializable"))
     }
 
-    /// Atomically replace the local projection file, never contacting mg-todo.
+    /// Atomically replace the local projection file, never contacting mg-remindr.
     ///
     /// # Errors
     /// Returns an error when the projection directory or replacement file cannot be written.
@@ -629,10 +629,10 @@ fn todo_index(indexes: &HashMap<&str, usize>, global_id: &str) -> Result<usize, 
 
 fn todo_id_from_global(global_id: &str) -> Result<TodoId, ProjectionError> {
     global_id
-        .strip_prefix("mg-todo:todo:")
+        .strip_prefix("mg-remindr:todo:")
         .ok_or_else(|| {
             ProjectionError::Conflict(format!(
-                "relationship endpoint is not an mg-todo todo: {global_id}"
+                "relationship endpoint is not an mg-remindr todo: {global_id}"
             ))
         })?
         .parse::<TodoId>()

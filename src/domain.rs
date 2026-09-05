@@ -313,7 +313,7 @@ impl FromStr for EventFrequency {
 /// A bounded repeat rule owned by this application.
 ///
 /// Deliberately separate from the todo `RecurrenceRule`, which is part of the
-/// `mg-todo` projection contract and cannot state a weekday set.
+/// `mg-remindr` projection contract and cannot state a weekday set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecurrence {
     pub frequency: EventFrequency,

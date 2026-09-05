@@ -54,5 +54,5 @@ git diff --check
 ## Stop conditions
 
 Stop and cut a prerequisite slice rather than expanding if the work needs a
-changed `mg-todo` projection contract, a per-occurrence exception model, a second
+changed `mg-remindr` projection contract, a per-occurrence exception model, a second
 writable authority for events, or a network fetch.
