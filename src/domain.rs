@@ -60,6 +60,8 @@ pub enum DomainError {
     InvalidRecurrenceRange,
     #[error("a recurring occurrence has no valid local time in '{timezone}'")]
     UnrepresentableOccurrence { timezone: String },
+    #[error("'{value}' is not a repeat frequency; use daily, weekly, or monthly")]
+    UnknownFrequency { value: String },
 }
 
 macro_rules! domain_id {
@@ -291,6 +293,21 @@ pub enum EventFrequency {
     Daily,
     Weekly,
     Monthly,
+}
+
+impl FromStr for EventFrequency {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "daily" | "day" => Ok(Self::Daily),
+            "weekly" | "week" => Ok(Self::Weekly),
+            "monthly" | "month" => Ok(Self::Monthly),
+            _ => Err(DomainError::UnknownFrequency {
+                value: value.to_owned(),
+            }),
+        }
+    }
 }
 
 /// A bounded repeat rule owned by this application.

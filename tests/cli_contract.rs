@@ -752,3 +752,78 @@ fn todo_edit_accepts_repeatable_dependency_assignment_and_clear() {
         .failure()
         .stderr(predicate::str::contains("database"));
 }
+
+#[test]
+fn event_create_exposes_the_repeat_rule_and_names_what_it_refuses() {
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--repeat"))
+        .stdout(predicate::str::contains("--by-weekday"))
+        .stdout(predicate::str::contains("--count"))
+        .stdout(predicate::str::contains("--until"));
+
+    // Each refusal names the flag or the domain rule, never a leaked Debug value
+    let calendar = "01a06dc9-bed7-7af2-aaa4-f7e8c22fe49b";
+    let timed = [
+        "--start",
+        "2026-09-07T07:00:00-07:00",
+        "--end",
+        "2026-09-07T07:30:00-07:00",
+        "--timezone",
+        "US/Pacific",
+        "--title",
+        "probe",
+        "--calendar",
+        calendar,
+    ];
+
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "create"])
+        .args(timed)
+        .args(["--repeat", "yearly", "--count", "3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is not a repeat frequency; use daily, weekly, or monthly",
+        ));
+
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "create"])
+        .args(timed)
+        .args([
+            "--repeat",
+            "weekly",
+            "--count",
+            "3",
+            "--by-weekday",
+            "funday",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not a weekday; use mon"));
+
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "create"])
+        .args(timed)
+        .args(["--interval", "2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--repeat"));
+
+    cargo_bin_cmd!("mg-calr")
+        .args(["event", "create"])
+        .args(timed)
+        .args([
+            "--repeat",
+            "weekly",
+            "--count",
+            "3",
+            "--until",
+            "2026-10-01",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}

@@ -12,7 +12,8 @@ The current incremental implementation includes:
   with times restated in the zone the agenda was asked for, and a bounded
   line-oriented keyboard shell;
 - bounded event recurrence — daily, weekly and monthly, with an optional weekday
-  set — expanded into occurrences at read time rather than stored per day;
+  set — set with `event create --repeat`, and expanded into occurrences at read
+  time rather than stored per day;
 - an iCalendar reader that imports `VEVENT` records and refuses by name any RRULE
   part this application cannot represent;
 - legacy todo/project/tag CRUD, lifecycle, recurrence, dependency, reminder-ledger, and JSON interchange behavior retained during the `mg-todo` migration period;

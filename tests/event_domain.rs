@@ -417,3 +417,35 @@ fn a_backwards_window_is_refused() {
         Err(DomainError::InvalidRecurrenceRange)
     );
 }
+
+#[test]
+fn a_repeating_event_is_created_with_its_rule_and_an_unusable_rule_is_refused() {
+    let mut app = EventUseCases::new(MemoryRepository::default());
+    let calendar = app.create_calendar("Study").unwrap();
+
+    let time = EventTime::timed(
+        instant("2026-09-07T07:00:00-07:00"),
+        instant("2026-09-07T07:30:00-07:00"),
+        "America/Los_Angeles",
+    )
+    .unwrap();
+    let rule = EventRecurrence::new(
+        EventFrequency::Weekly,
+        1,
+        Some(6),
+        None,
+        vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+    )
+    .unwrap();
+
+    let event = app
+        .create_repeating_event(calendar.id, "Wake", time.clone(), Some(rule.clone()))
+        .unwrap();
+    assert_eq!(event.metadata.recurrence_rule, Some(rule));
+
+    // An event created without a rule keeps carrying none
+    let plain = app
+        .create_repeating_event(calendar.id, "One off", time.clone(), None)
+        .unwrap();
+    assert_eq!(plain.metadata.recurrence_rule, None);
+}

@@ -11,7 +11,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::domain::{
-    Calendar, CalendarId, DomainError, Event, EventId, EventTime,
+    Calendar, CalendarId, DomainError, Event, EventId, EventRecurrence, EventTime,
     todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId, TodoReminder},
 };
 
@@ -1329,12 +1329,41 @@ where
         title: impl Into<String>,
         time: EventTime,
     ) -> Result<Event, ApplicationError<R::Error>> {
-        let event = Event::new(calendar_id, title, time)?;
+        self.create_repeating_event(calendar_id, title, time, None)
+    }
+
+    /// Create an event that may repeat.
+    ///
+    /// # Errors
+    /// Returns domain validation errors for the title, time, or repeat rule, and
+    /// synchronous repository persistence errors.
+    pub fn create_repeating_event(
+        &mut self,
+        calendar_id: CalendarId,
+        title: impl Into<String>,
+        time: EventTime,
+        recurrence: Option<EventRecurrence>,
+    ) -> Result<Event, ApplicationError<R::Error>> {
+        let mut event = Event::new(calendar_id, title, time)?;
+        if let Some(rule) = recurrence {
+            event.metadata.recurrence_rule = Some(validated_rule(rule, &event.time)?);
+        }
         self.repository
             .save_event(event.clone())
             .map_err(ApplicationError::Repository)?;
         Ok(event)
     }
+}
+
+/// Refuse a rule that cannot produce its own first occurrence, before it is stored.
+fn validated_rule(rule: EventRecurrence, time: &EventTime) -> Result<EventRecurrence, DomainError> {
+    rule.validate()?;
+    let first = match time {
+        EventTime::Timed { start, .. } => start.date_naive(),
+        EventTime::AllDay { start, .. } => *start,
+    };
+    rule.expand(time, first, first)?;
+    Ok(rule)
 }
 
 impl<R> EventUseCases<R>
@@ -1364,7 +1393,26 @@ where
         title: impl Into<String>,
         time: EventTime,
     ) -> Result<Event, ApplicationError<R::Error>> {
-        let event = Event::new(calendar_id, title, time)?;
+        self.create_repeating_event_async(calendar_id, title, time, None)
+            .await
+    }
+
+    /// Create an event that may repeat.
+    ///
+    /// # Errors
+    /// Returns a domain error for an invalid title, time, or repeat rule, and a
+    /// typed repository error when the write fails.
+    pub async fn create_repeating_event_async(
+        &self,
+        calendar_id: CalendarId,
+        title: impl Into<String>,
+        time: EventTime,
+        recurrence: Option<EventRecurrence>,
+    ) -> Result<Event, ApplicationError<R::Error>> {
+        let mut event = Event::new(calendar_id, title, time)?;
+        if let Some(rule) = recurrence {
+            event.metadata.recurrence_rule = Some(validated_rule(rule, &event.time)?);
+        }
         self.repository
             .save_event(&event)
             .await

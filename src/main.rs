@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
@@ -15,7 +15,9 @@ use mg_calr::application::{
 use mg_calr::config;
 use mg_calr::domain::todo::ProjectId;
 use mg_calr::domain::todo::{Priority, TagId, TodoDue, TodoId};
-use mg_calr::domain::{CalendarId, Event, EventId, EventTime, RfcUid};
+use mg_calr::domain::{
+    CalendarId, Event, EventFrequency, EventId, EventRecurrence, EventTime, RfcUid,
+};
 use mg_calr::storage::{
     self, AgendaRepositoryError, MigrationState, PostgresCalendarEventRepository,
     PostgresProjectRepository, PostgresTodoRepository, ProjectionAgendaRepository, StorageError,
@@ -367,6 +369,32 @@ struct EventCreateArgs {
     all_day_start: Option<NaiveDate>,
     #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
     all_day_end: Option<NaiveDate>,
+    /// Repeat this event: daily, weekly, or monthly
+    #[arg(long, value_name = "FREQUENCY")]
+    repeat: Option<EventFrequency>,
+    /// Repeat every N periods; defaults to every period
+    #[arg(long, requires = "repeat", value_name = "N")]
+    interval: Option<u32>,
+    /// Weekdays a weekly repeat lands on, e.g. mon,tue,wed
+    #[arg(
+        long,
+        requires = "repeat",
+        value_delimiter = ',',
+        value_name = "DAYS",
+        value_parser = parse_weekday
+    )]
+    by_weekday: Vec<Weekday>,
+    /// Stop after this many occurrences
+    #[arg(long, requires = "repeat", conflicts_with = "until", value_name = "N")]
+    count: Option<u32>,
+    /// Stop on this date
+    #[arg(
+        long,
+        requires = "repeat",
+        conflicts_with = "count",
+        value_name = "DATE"
+    )]
+    until: Option<NaiveDate>,
 }
 
 #[derive(Debug, Args)]
@@ -514,6 +542,35 @@ fn prompt(prompt_text: &str) -> Result<String, AppError> {
         )));
     }
     Ok(value)
+}
+
+/// Read a weekday name, naming the accepted forms rather than leaking chrono's error.
+fn parse_weekday(value: &str) -> Result<Weekday, String> {
+    value.trim().parse::<Weekday>().map_err(|_| {
+        format!("'{value}' is not a weekday; use mon, tue, wed, thu, fri, sat, or sun")
+    })
+}
+
+/// Build the repeat rule a person asked for, if any.
+fn event_recurrence(args: &EventCreateArgs) -> Result<Option<EventRecurrence>, AppError> {
+    let Some(frequency) = args.repeat else {
+        return Ok(None);
+    };
+    // A rule with neither bound would repeat forever; the domain refuses it, and
+    // saying so here names the missing flag rather than the invariant
+    if args.count.is_none() && args.until.is_none() {
+        return Err(AppError::InvalidInput(
+            "a repeating event needs --count or --until".to_owned(),
+        ));
+    }
+    let rule = EventRecurrence::new(
+        frequency,
+        args.interval.unwrap_or(1),
+        args.count,
+        args.until,
+        args.by_weekday.clone(),
+    )?;
+    Ok(Some(rule))
 }
 
 fn event_time(args: &EventCreateArgs, no_input: bool) -> Result<EventTime, AppError> {
@@ -849,6 +906,7 @@ async fn run_event_command(
             required(args.calendar, no_input, "calendar", "Calendar ID")?,
             required(args.title.clone(), no_input, "title", "Event title")?,
             event_time(args, no_input)?,
+            event_recurrence(args)?,
         ))
     } else {
         None
@@ -871,9 +929,9 @@ async fn run_event_command(
     let app = EventUseCases::new(PostgresCalendarEventRepository::new(database.clone()));
     match &args.command {
         EventCommand::Create(_) => {
-            let (calendar_id, title, time) = create_input.expect("create input exists");
+            let (calendar_id, title, time, recurrence) = create_input.expect("create input exists");
             let event = app
-                .create_event_async(calendar_id, title, time)
+                .create_repeating_event_async(calendar_id, title, time, recurrence)
                 .await
                 .map_err(application_error)?;
             print_projection(json, "event.create", EventProjection::from(event))
