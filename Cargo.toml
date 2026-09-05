@@ -3,6 +3,7 @@ name = "mg-calr"
 version = "0.1.0"
 edition = "2024"
 description = "Keyboard-first local calendar foundation"
+license = "MIT"
 rust-version = "1.85"
 
 [dependencies]
