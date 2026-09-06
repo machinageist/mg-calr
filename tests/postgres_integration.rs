@@ -88,6 +88,33 @@ async fn migration_is_idempotent_on_disposable_database() {
     assert!(second.iter().all(|migration| migration.applied));
 }
 
+#[tokio::test]
+#[ignore = "requires explicit disposable PostgreSQL opt-in"]
+async fn snapshot_identity_is_deterministic_and_dates_are_not_invented() {
+    let settings = opted_in_settings();
+    mg_calr::storage::migrate(&settings).await.unwrap();
+
+    // Exporting unchanged data twice must agree on the content digest. Only
+    // created_at, which is the wall clock of the export itself, may differ.
+    let first = mg_calr::interop::export_snapshot(&settings).await.unwrap();
+    let second = mg_calr::interop::export_snapshot(&settings).await.unwrap();
+    assert_eq!(first.source_revision, second.source_revision);
+    assert_eq!(first.export_id, second.export_id);
+    assert_eq!(first.records.len(), second.records.len());
+    assert_eq!(first.interop_schema, "mg.interop/1");
+
+    // A relationship the schema cannot date must say so rather than borrow the
+    // export's own clock, which would look like evidence it is not.
+    for link in &first.links {
+        if let Some(created_at) = link.created_at {
+            assert!(
+                created_at < first.created_at,
+                "a link dated at or after the export borrowed the export clock"
+            );
+        }
+    }
+}
+
 /// A weekly rule with a weekday set, the shape the imported schedules use.
 fn recurring_fixture(calendar_id: CalendarId) -> (Event, EventRecurrence) {
     let mut event = Event::new(

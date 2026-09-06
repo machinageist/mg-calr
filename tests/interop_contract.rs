@@ -23,22 +23,19 @@ fn interop_export_requires_json_before_database_access() {
         .stderr(predicate::str::contains("interop export requires --json"));
 }
 
+/// Guards one property with no cheap behavioural proxy: a snapshot must be read
+/// under a single repeatable-read transaction, or it can interleave writes and
+/// describe a state the database never held. Proving that from the outside needs
+/// a concurrent writer racing an export, which is slower and flakier than reading
+/// the isolation level the code asks for.
+///
+/// Determinism and date handling used to be asserted here by grepping the source
+/// too. They are behaviour, and are now tested as behaviour in
+/// `postgres_integration.rs::snapshot_identity_is_deterministic_and_dates_are_not_invented`
+/// and end to end in `geistos/tests/suite-pipe.sh`.
 #[test]
-fn snapshot_contract_uses_one_repeatable_read_and_deterministic_identity() {
+fn snapshot_is_read_under_one_repeatable_read_transaction() {
     let storage = include_str!("../src/storage.rs");
-    let interop = include_str!("../src/interop.rs");
     assert!(storage.contains("IsolationLevel::RepeatableRead"));
     assert!(storage.contains("export_snapshot_sources"));
-    assert!(interop.contains("Sha256::digest"));
-    assert!(interop.contains("source_revision: digest"));
-    assert!(!interop.contains("created_at: Utc::now()"));
-}
-
-#[test]
-fn relationship_contract_does_not_invent_creation_times() {
-    let interop = include_str!("../src/interop.rs");
-    assert!(interop.contains("created_at: None"));
-    assert!(interop.contains("creation time unavailable"));
-    assert!(interop.contains("purged_absence"));
-    assert!(interop.contains("state"));
 }
