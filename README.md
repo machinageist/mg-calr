@@ -80,4 +80,6 @@ The projection import is an authority-boundary migration slice, not completion o
 single occurrence of a series remain incomplete, as does full event-core
 lifecycle. Reminder delivery/service actions, search/bulk safety/audit, lossless iCalendar export, vdirsyncer/iCloud synchronization, backup/restore, a raw-mode TUI, and packaging remain open.
 
-No `LICENSE` is included because MIT versus Apache-2.0 remains unresolved.
+## License
+
+MIT. See `LICENSE`.
