@@ -91,13 +91,19 @@ async fn migration_is_idempotent_on_disposable_database() {
 #[tokio::test]
 #[ignore = "requires explicit disposable PostgreSQL opt-in"]
 async fn snapshot_identity_is_deterministic_and_dates_are_not_invented() {
-    let settings = opted_in_settings();
+    // Its own database. "Exporting the same data twice agrees" only means
+    // anything if nothing else writes between the two exports, and a sibling
+    // test creating and deleting events would make them differ for real.
+    let shared = opted_in_settings();
+    let name = format!("mg_calr_test_export_{}", std::process::id());
+    let settings = disposable_database(&shared, &name).await;
     mg_calr::storage::migrate(&settings).await.unwrap();
 
     // Exporting unchanged data twice must agree on the content digest. Only
     // created_at, which is the wall clock of the export itself, may differ.
     let first = mg_calr::interop::export_snapshot(&settings).await.unwrap();
     let second = mg_calr::interop::export_snapshot(&settings).await.unwrap();
+    drop_database(&shared, &name).await;
     assert_eq!(first.source_revision, second.source_revision);
     assert_eq!(first.export_id, second.export_id);
     assert_eq!(first.records.len(), second.records.len());
@@ -113,6 +119,75 @@ async fn snapshot_identity_is_deterministic_and_dates_are_not_invented() {
             );
         }
     }
+}
+
+/// The bug this guards: the ledger bootstrap used to run on a bare connection
+/// before the transaction opened, so it sat outside the advisory lock. Concurrent
+/// `CREATE TABLE IF NOT EXISTS` is not race-safe in PostgreSQL — two sessions can
+/// both find the table absent and both attempt it — and the loser got a raw 42P07
+/// surfaced as a generic query error. It only ever bit on a genuinely fresh
+/// database with two callers, which is why running tests single-threaded hid it.
+#[tokio::test]
+#[ignore = "requires explicit disposable PostgreSQL opt-in"]
+async fn concurrent_migrations_of_a_fresh_database_both_succeed() {
+    // Its own database: the race needs an absent ledger, and emptying the shared
+    // one would pull the schema out from under every test running beside it
+    let shared = opted_in_settings();
+    let name = format!("mg_calr_test_race_{}", std::process::id());
+    let settings = disposable_database(&shared, &name).await;
+
+    let first = mg_calr::storage::migrate(&settings);
+    let second = mg_calr::storage::migrate(&settings);
+    let (left, right) = tokio::join!(first, second);
+
+    // Drop before asserting, so a failure still cleans up after itself
+    let outcome = (left.is_ok(), right.is_ok());
+    let counts = (left.map(|a| a.len()).ok(), right.map(|b| b.len()).ok());
+    drop_database(&shared, &name).await;
+
+    assert_eq!(
+        outcome,
+        (true, true),
+        "both concurrent migrations of a fresh database must succeed"
+    );
+    assert_eq!(counts.0.unwrap(), counts.1.unwrap());
+}
+
+/// Create an empty database beside the opted-in one, so a test that needs an
+/// absent schema cannot disturb anything sharing the main one.
+async fn disposable_database(shared: &ConnectionSettings, name: &str) -> ConnectionSettings {
+    assert!(
+        name.starts_with("mg_calr_test"),
+        "a disposable database must be named for the test suite"
+    );
+    let client = cleanup_client(shared).await;
+    let _ = client
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .await;
+    client
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .expect("create the disposable race database");
+
+    let config = test_postgres_config(shared);
+    let host = config
+        .get_hosts()
+        .first()
+        .map_or_else(String::new, |host| match host {
+            tokio_postgres::config::Host::Unix(path) => path.display().to_string(),
+            tokio_postgres::config::Host::Tcp(name) => name.clone(),
+        });
+    ConnectionSettings::Url {
+        url: format!("postgresql:///{name}?host={host}"),
+        source: ConfigSource::Environment,
+    }
+}
+
+async fn drop_database(shared: &ConnectionSettings, name: &str) {
+    let client = cleanup_client(shared).await;
+    let _ = client
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .await;
 }
 
 /// A weekly rule with a weekday set, the shape the imported schedules use.

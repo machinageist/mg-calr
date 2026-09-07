@@ -585,7 +585,13 @@ fn migration_checksum(sql: &str) -> String {
     format!("{:x}", Sha256::digest(sql.as_bytes()))
 }
 
-async fn ensure_migration_table(client: &Client) -> Result<(), StorageError> {
+// Takes any client so the caller can pass a transaction. Concurrent
+// CREATE TABLE IF NOT EXISTS is not race-safe in PostgreSQL — two sessions can
+// both find the table absent and both attempt it, and the loser gets 42P07 —
+// so this must run under the advisory lock, never on a bare connection.
+async fn ensure_migration_table<C: tokio_postgres::GenericClient + Sync>(
+    client: &C,
+) -> Result<(), StorageError> {
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS mg_calr_schema_migrations (\
@@ -725,12 +731,14 @@ async fn verify_live_schema(client: &Client, max_version: i64) -> Result<(), Sto
 /// migration drift. SQL failures roll back the migration transaction.
 pub async fn migrate(settings: &ConnectionSettings) -> Result<Vec<MigrationState>, StorageError> {
     let (mut client, _connection_task) = connect(settings).await?;
-    ensure_migration_table(&client).await?;
     let transaction = client.transaction().await.map_err(StorageError::Query)?;
     transaction
         .query_one("SELECT pg_advisory_xact_lock($1)", &[&6_851_863_988_i64])
         .await
         .map_err(StorageError::Query)?;
+    // Inside the lock, so two processes migrating one fresh database serialize
+    // rather than racing to create the ledger. mg-remindr already does this.
+    ensure_migration_table(&transaction).await?;
 
     for migration in MIGRATIONS {
         let expected_checksum = migration_checksum(migration.sql);
