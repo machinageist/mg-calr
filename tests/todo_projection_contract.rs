@@ -176,6 +176,38 @@ fn rejects_noncanonical_identity_and_relationship_metadata() {
     );
 }
 
+/// The bug this guards: the producer's `created_at` is the newest record's
+/// `observed_at`, so it stops moving as soon as nothing changes. Judging agenda
+/// freshness by it meant a quiet todo list went stale after 24 hours and could
+/// never be refreshed out of it — re-importing produced a byte-identical
+/// envelope with the same old timestamp, and the whole agenda failed, events
+/// included, even though events never come from this projection at all.
+#[test]
+fn a_just_imported_projection_is_fresh_however_old_its_data_is() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("projection.json");
+    // The fixture's created_at is 2026-08-24, far outside the 24-hour limit
+    TodoProjectionSnapshot::validate(snapshot())
+        .unwrap()
+        .store(&path)
+        .unwrap();
+
+    let loaded = TodoProjectionSnapshot::load(&path).unwrap();
+    assert!(
+        !matches!(loaded.agenda_todos(), Err(ProjectionError::Stale(_))),
+        "a projection imported moments ago must not be judged stale: {:?}",
+        loaded.agenda_todos().err()
+    );
+
+    // Without a file behind it there is no import time, and the envelope's own
+    // timestamp is all there is to judge by
+    let parsed = TodoProjectionSnapshot::validate(snapshot()).unwrap();
+    assert!(
+        matches!(parsed.agenda_todos(), Err(ProjectionError::Stale(_))),
+        "a snapshot with no import time still falls back to created_at"
+    );
+}
+
 #[test]
 fn rejects_stale_and_conflicting_replacements() {
     let directory = tempdir().unwrap();

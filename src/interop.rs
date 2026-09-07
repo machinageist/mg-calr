@@ -32,6 +32,16 @@ const MAX_IMPORT_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoProjectionSnapshot {
     snapshot: Snapshot,
+    /// When this store file was last written, which is when mg-calr last accepted
+    /// a projection. Freshness is a property of the cache, not of the data: the
+    /// producer's `created_at` is the newest record's `observed_at`, so it does not
+    /// move when nothing changed, and judging age by it made a quiet todo list
+    /// permanently stale with no way to refresh out of it.
+    ///
+    /// Never serialized: it describes this machine's copy, not the projection,
+    /// and must not reach the store file or any comparison of two snapshots.
+    #[serde(skip)]
+    imported_at: Option<DateTime<Utc>>,
 }
 
 /// Errors returned before any projection file is replaced.
@@ -83,7 +93,10 @@ impl TodoProjectionSnapshot {
                 "projection created_at is in the future".to_owned(),
             ));
         }
-        if now - self.snapshot.created_at > MAX_AGENDA_PROJECTION_AGE {
+        // A snapshot parsed without a file behind it has no import time, and falls
+        // back to the envelope's own timestamp.
+        let taken = self.imported_at.unwrap_or(self.snapshot.created_at);
+        if now - taken > MAX_AGENDA_PROJECTION_AGE {
             return Err(ProjectionError::Stale(
                 "projection is older than the 24-hour agenda freshness limit".to_owned(),
             ));
@@ -428,7 +441,10 @@ impl TodoProjectionSnapshot {
                 )));
             }
         }
-        Ok(Self { snapshot })
+        Ok(Self {
+            snapshot,
+            imported_at: None,
+        })
     }
 
     /// Return a stable digest of the complete imported envelope.
@@ -615,7 +631,9 @@ impl TodoProjectionSnapshot {
         let json = String::from_utf8(bytes).map_err(|error| {
             ProjectionError::Read(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?;
-        Self::parse(&json)
+        let mut loaded = Self::parse(&json)?;
+        loaded.imported_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+        Ok(loaded)
     }
 }
 
