@@ -10,17 +10,15 @@ use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
     CalendarProjection, EventEdit, EventLifecycleError, EventProjection, EventUseCases,
-    ProjectUseCases, QueryError, TagUseCases, TodoEdit, TodoUseCases,
+    ProjectUseCases, QueryError, TagUseCases,
 };
 use mg_calr::config;
-use mg_calr::domain::todo::ProjectId;
-use mg_calr::domain::todo::{Priority, TagId, TodoDue, TodoId};
 use mg_calr::domain::{
     CalendarId, Event, EventFrequency, EventId, EventRecurrence, EventTime, RfcUid,
 };
 use mg_calr::storage::{
     self, AgendaRepositoryError, MigrationState, PostgresCalendarEventRepository,
-    PostgresProjectRepository, PostgresTodoRepository, ProjectionAgendaRepository, StorageError,
+    PostgresProjectRepository, ProjectionAgendaRepository, StorageError,
 };
 use mg_calr::tui::TuiState;
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
@@ -56,8 +54,6 @@ enum Command {
     Calendar(CalendarArgs),
     /// Create and query events.
     Event(EventArgs),
-    /// Create and query todos.
-    Todo(TodoArgs),
     /// Query the combined event and todo agenda.
     Agenda(AgendaArgs),
     /// Validate and import an mg-remindr projection.
@@ -230,125 +226,6 @@ enum ProjectCommand {
     Create { name: Option<String> },
     /// List live projects in stable order.
     List,
-}
-
-#[derive(Debug, Args)]
-struct TodoArgs {
-    #[command(subcommand)]
-    command: TodoCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum TodoCommand {
-    /// Create one todo, optionally with a due date or instant.
-    Create(TodoCreateArgs),
-    /// List todos in stable repository order.
-    List,
-    /// Show one todo by its full stable ID.
-    Show {
-        #[arg(long)]
-        todo_id: TodoId,
-    },
-    /// Complete one live todo using its current optimistic-lock version.
-    Complete {
-        #[arg(long)]
-        todo_id: TodoId,
-        #[arg(long)]
-        version: i64,
-    },
-    /// Edit live core fields using its current optimistic-lock version.
-    Edit(TodoEditArgs),
-    /// Trash one live todo using its current optimistic-lock version.
-    Trash {
-        #[arg(long)]
-        todo_id: TodoId,
-        #[arg(long)]
-        version: i64,
-    },
-    /// Restore one trashed todo using its current optimistic-lock version.
-    Restore {
-        #[arg(long)]
-        todo_id: TodoId,
-        #[arg(long)]
-        version: i64,
-    },
-    /// Permanently delete one trashed todo after explicit confirmation.
-    Purge {
-        #[arg(long)]
-        todo_id: TodoId,
-        #[arg(long)]
-        version: i64,
-        /// Confirm permanent deletion; without it no database is accessed.
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Export all projects, tags, todos, and relationships as deterministic JSON.
-    Export,
-    /// Import a previously exported JSON document transactionally.
-    Import {
-        #[arg(long)]
-        file: PathBuf,
-    },
-    /// Scan due reminders and record delivery candidates without sending notifications.
-    ScanReminders {
-        #[arg(long)]
-        at: DateTime<FixedOffset>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-struct TodoCreateArgs {
-    #[arg(long)]
-    title: Option<String>,
-    #[arg(long, default_value = "none")]
-    priority: Priority,
-    #[arg(long, conflicts_with = "due_at")]
-    due_date: Option<NaiveDate>,
-    #[arg(long, conflicts_with = "due_date")]
-    due_at: Option<DateTime<FixedOffset>>,
-    #[arg(long)]
-    timezone: Option<String>,
-}
-
-#[derive(Debug, Args)]
-#[allow(clippy::struct_excessive_bools)]
-struct TodoEditArgs {
-    #[arg(long)]
-    todo_id: TodoId,
-    #[arg(long)]
-    version: i64,
-    #[arg(long)]
-    title: Option<String>,
-    #[arg(long)]
-    priority: Option<Priority>,
-    #[arg(long, conflicts_with = "due_at")]
-    due_date: Option<NaiveDate>,
-    #[arg(long, conflicts_with = "due_date")]
-    due_at: Option<DateTime<FixedOffset>>,
-    #[arg(long)]
-    timezone: Option<String>,
-    #[arg(long, conflicts_with = "clear_notes")]
-    notes: Option<String>,
-    #[arg(long, conflicts_with = "notes")]
-    clear_notes: bool,
-    #[arg(long, conflicts_with = "clear_project")]
-    project_id: Option<ProjectId>,
-    #[arg(long, conflicts_with = "project_id")]
-    clear_project: bool,
-    #[arg(long, conflicts_with = "clear_parent")]
-    parent_id: Option<TodoId>,
-    #[arg(long, conflicts_with = "parent_id")]
-    clear_parent: bool,
-    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "clear_tags")]
-    tag: Vec<TagId>,
-    #[arg(long, conflicts_with = "tag")]
-    clear_tags: bool,
-    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "clear_dependencies")]
-    depends_on: Vec<TodoId>,
-    #[arg(long, conflicts_with = "depends_on")]
-    clear_dependencies: bool,
 }
 
 #[derive(Debug, Args)]
@@ -658,94 +535,6 @@ fn event_edit(args: &EventEditArgs) -> Result<EventEdit, AppError> {
     Ok(edit)
 }
 
-fn todo_due(args: &TodoCreateArgs, no_input: bool) -> Result<Option<TodoDue>, AppError> {
-    if args.due_date.is_none() && args.due_at.is_none() {
-        if args.timezone.is_some() {
-            return Err(AppError::InvalidInput(
-                "--timezone requires --due-date or --due-at".to_owned(),
-            ));
-        }
-        return Ok(None);
-    }
-    let timezone = required(args.timezone.clone(), no_input, "timezone", "IANA timezone")?;
-    match (args.due_date, args.due_at) {
-        (Some(date), None) => TodoDue::date(date, timezone)
-            .map(Some)
-            .map_err(AppError::from),
-        (None, Some(at)) => TodoDue::timed(at, timezone)
-            .map(Some)
-            .map_err(AppError::from),
-        _ => unreachable!("clap prevents both todo due forms"),
-    }
-}
-
-fn todo_edit(args: &TodoEditArgs) -> Result<TodoEdit, AppError> {
-    let due = if args.due_date.is_none() && args.due_at.is_none() {
-        if args.timezone.is_some() {
-            return Err(AppError::InvalidInput(
-                "--timezone requires --due-date or --due-at".to_owned(),
-            ));
-        }
-        None
-    } else {
-        let timezone = args.timezone.clone().ok_or_else(|| {
-            AppError::InvalidInput("--due-date or --due-at requires --timezone".to_owned())
-        })?;
-        match (args.due_date, args.due_at) {
-            (Some(date), None) => Some(TodoDue::date(date, timezone)?),
-            (None, Some(at)) => Some(TodoDue::timed(at, timezone)?),
-            _ => unreachable!("clap prevents both todo due forms"),
-        }
-    };
-    let notes = if args.clear_notes {
-        Some(None)
-    } else {
-        args.notes.clone().map(Some)
-    };
-    let project_id = if args.clear_project {
-        Some(None)
-    } else {
-        args.project_id.map(Some)
-    };
-    let parent_id = if args.clear_parent {
-        Some(None)
-    } else {
-        args.parent_id.map(Some)
-    };
-    let tag_ids = if args.clear_tags {
-        Some(Vec::new())
-    } else if args.tag.is_empty() {
-        None
-    } else {
-        Some(args.tag.clone())
-    };
-    let dependency_ids = if args.clear_dependencies {
-        Some(Vec::new())
-    } else if args.depends_on.is_empty() {
-        None
-    } else {
-        Some(args.depends_on.clone())
-    };
-    let edit = TodoEdit {
-        title: args.title.clone(),
-        priority: args.priority,
-        due,
-        recurrence: None,
-        notes,
-        project_id,
-        parent_id,
-        tag_ids,
-        dependency_ids,
-        reminders: None,
-    };
-    if edit.is_empty() {
-        return Err(AppError::InvalidInput(
-            "todo edit requires at least one editable field".to_owned(),
-        ));
-    }
-    Ok(edit)
-}
-
 fn application_error(error: ApplicationError<StorageError>) -> AppError {
     match error {
         ApplicationError::Domain(error) => AppError::Domain(error),
@@ -1017,119 +806,6 @@ async fn run_project_command(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn run_todo_command(
-    args: &TodoArgs,
-    database: config::ConnectionSettings,
-    json: bool,
-    no_input: bool,
-) -> Result<(), AppError> {
-    match &args.command {
-        TodoCommand::Create(args) => {
-            let title = required(args.title.clone(), no_input, "title", "Todo title")?;
-            let due = todo_due(args, no_input)?;
-            let todo = TodoUseCases::new(PostgresTodoRepository::new(database))
-                .create_todo_async(title, args.priority, due)
-                .await
-                .map_err(application_error)?;
-            print_projection(json, "todo.create", todo)
-        }
-        TodoCommand::List => print_projections(
-            json,
-            "todo.list",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .list_todos_async()
-                .await
-                .map_err(query_error)?,
-        ),
-        TodoCommand::Show { todo_id } => print_projection(
-            json,
-            "todo.show",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .show_todo_async(*todo_id)
-                .await
-                .map_err(query_error)?,
-        ),
-        TodoCommand::Complete { todo_id, version } => print_projection(
-            json,
-            "todo.complete",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .complete_todo_async(*todo_id, *version)
-                .await
-                .map_err(application_error)?,
-        ),
-        TodoCommand::Edit(args) => {
-            let edit = todo_edit(args)?;
-            print_projection(
-                json,
-                "todo.edit",
-                TodoUseCases::new(PostgresTodoRepository::new(database))
-                    .edit_todo_async(args.todo_id, args.version, edit)
-                    .await
-                    .map_err(application_error)?,
-            )
-        }
-        TodoCommand::Trash { todo_id, version } => print_projection(
-            json,
-            "todo.trash",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .trash_todo_async(*todo_id, *version)
-                .await
-                .map_err(application_error)?,
-        ),
-        TodoCommand::Restore { todo_id, version } => print_projection(
-            json,
-            "todo.restore",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .restore_todo_async(*todo_id, *version)
-                .await
-                .map_err(application_error)?,
-        ),
-        TodoCommand::Purge {
-            todo_id,
-            version,
-            yes,
-        } => {
-            if !yes {
-                return Err(AppError::InvalidInput(
-                    "todo purge requires --yes confirmation; no database was accessed".to_owned(),
-                ));
-            }
-            print_projection(
-                json,
-                "todo.purge",
-                TodoUseCases::new(PostgresTodoRepository::new(database))
-                    .purge_todo_async(*todo_id, *version)
-                    .await
-                    .map_err(application_error)?,
-            )
-        }
-        TodoCommand::Export => {
-            let payload = storage::export_todos(&database).await?;
-            println!("{}", serde_json::to_string(&payload)?);
-            Ok(())
-        }
-        TodoCommand::Import { file } => {
-            let input = std::fs::read_to_string(file)?;
-            let payload = storage::TodoExport::parse(&input)?;
-            let count = storage::import_todos(&database, &payload).await?;
-            print_debug(
-                json,
-                "todo.import",
-                serde_json::json!({ "imported": count }),
-            )
-        }
-        TodoCommand::ScanReminders { at, dry_run } => print_debug(
-            json,
-            "todo.reminder_scan",
-            TodoUseCases::new(PostgresTodoRepository::new(database))
-                .scan_reminders_async(at.with_timezone(&Utc), *dry_run)
-                .await
-                .map_err(query_error)?,
-        ),
-    }
-}
-
 async fn run_agenda_command(
     args: &AgendaArgs,
     database: config::ConnectionSettings,
@@ -1375,9 +1051,6 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }
         Command::Event(event) => {
             run_event_command(event, app_config.database, cli.json, cli.no_input).await
-        }
-        Command::Todo(todo) => {
-            run_todo_command(todo, app_config.database, cli.json, cli.no_input).await
         }
         Command::Agenda(agenda) => {
             run_agenda_command(
