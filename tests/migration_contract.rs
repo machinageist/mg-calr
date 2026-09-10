@@ -1,12 +1,12 @@
 use mg_calr::storage::{
     EVENT_RECURRENCE_MIGRATION, FOUNDATION_MIGRATION, MIGRATIONS,
-    REMINDER_DELIVERY_LEDGER_MIGRATION, REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION,
-    TODO_RECURRENCE_MIGRATION,
+    REMINDER_DELIVERY_LEDGER_MIGRATION, REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION,
+    REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION, TODO_RECURRENCE_MIGRATION,
 };
 
 #[test]
 fn foundation_migration_is_embedded_and_covers_only_foundation_entities() {
-    assert_eq!(MIGRATIONS.len(), 8);
+    assert_eq!(MIGRATIONS.len(), 9);
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[0].sql, FOUNDATION_MIGRATION);
 
@@ -69,6 +69,24 @@ fn reminder_migration_bridges_delivery_identity_without_external_transport() {
     assert!(sql.contains("duplicate.id <> canonical.keeper_id"));
     assert!(mg_calr::storage::FOUNDATION_MIGRATION.contains("UNIQUE (reminder_id, scheduled_for)"));
     assert!(!sql.to_ascii_lowercase().contains("notify"));
+}
+
+#[test]
+fn legacy_todo_authority_migration_is_append_only_and_preserves_event_reminders() {
+    assert_eq!(MIGRATIONS[8].version, 9);
+    assert_eq!(MIGRATIONS[8].name, "remove_legacy_todo_authority");
+    assert_eq!(MIGRATIONS[8].sql, REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION);
+    for table in ["todo_reminders", "todo_tags", "todo_dependencies", "todos"] {
+        assert!(
+            REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION
+                .contains(&format!("DROP TABLE IF EXISTS {table}"))
+        );
+    }
+    assert!(!REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION.contains("DROP TABLE IF EXISTS reminders"));
+    assert!(
+        !REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION
+            .contains("DROP TABLE IF EXISTS reminder_deliveries")
+    );
 }
 
 #[test]

@@ -85,7 +85,7 @@ fn todo_validation_and_projection_are_serializable() {
 fn todo_core_migration_is_ordered_and_non_destructive() {
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(MIGRATIONS[1].name, "todo_core");
     let sql = MIGRATIONS[1].sql;
