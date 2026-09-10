@@ -88,39 +88,6 @@ async fn migration_is_idempotent_on_disposable_database() {
     assert!(second.iter().all(|migration| migration.applied));
 }
 
-#[tokio::test]
-#[ignore = "requires explicit disposable PostgreSQL opt-in"]
-async fn snapshot_identity_is_deterministic_and_dates_are_not_invented() {
-    // Its own database. "Exporting the same data twice agrees" only means
-    // anything if nothing else writes between the two exports, and a sibling
-    // test creating and deleting events would make them differ for real.
-    let shared = opted_in_settings();
-    let name = format!("mg_calr_test_export_{}", std::process::id());
-    let settings = disposable_database(&shared, &name).await;
-    mg_calr::storage::migrate(&settings).await.unwrap();
-
-    // Exporting unchanged data twice must agree on the content digest. Only
-    // created_at, which is the wall clock of the export itself, may differ.
-    let first = mg_calr::interop::export_snapshot(&settings).await.unwrap();
-    let second = mg_calr::interop::export_snapshot(&settings).await.unwrap();
-    drop_database(&shared, &name).await;
-    assert_eq!(first.source_revision, second.source_revision);
-    assert_eq!(first.export_id, second.export_id);
-    assert_eq!(first.records.len(), second.records.len());
-    assert_eq!(first.interop_schema, "mg.interop/1");
-
-    // A relationship the schema cannot date must say so rather than borrow the
-    // export's own clock, which would look like evidence it is not.
-    for link in &first.links {
-        if let Some(created_at) = link.created_at {
-            assert!(
-                created_at < first.created_at,
-                "a link dated at or after the export borrowed the export clock"
-            );
-        }
-    }
-}
-
 /// The bug this guards: the ledger bootstrap used to run on a bare connection
 /// before the transaction opened, so it sat outside the advisory lock. Concurrent
 /// `CREATE TABLE IF NOT EXISTS` is not race-safe in PostgreSQL — two sessions can

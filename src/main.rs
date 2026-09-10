@@ -60,7 +60,7 @@ enum Command {
     Todo(TodoArgs),
     /// Query the combined event and todo agenda.
     Agenda(AgendaArgs),
-    /// Export a read-only mg.interop/1 snapshot.
+    /// Validate and import an mg-remindr projection.
     Interop(InteropArgs),
     /// Create and list projects.
     Project(ProjectArgs),
@@ -78,8 +78,6 @@ struct InteropArgs {
 
 #[derive(Debug, Subcommand)]
 enum InteropCommand {
-    /// Export calendars, events, projects, tags, todos, and relationships.
-    Export,
     /// Import and validate an immutable mg-remindr projection snapshot.
     ImportTodo {
         /// JSON envelope exported by mg-remindr.
@@ -1391,16 +1389,6 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
             .await
         }
         Command::Interop(interop) => match &interop.command {
-            InteropCommand::Export => {
-                if !cli.json {
-                    return Err(AppError::InvalidInput(
-                        "interop export requires --json".to_owned(),
-                    ));
-                }
-                let snapshot = mg_calr::interop::export_snapshot(&app_config.database).await?;
-                println!("{}", serde_json::to_string(&snapshot)?);
-                Ok(())
-            }
             InteropCommand::ImportTodo { .. } => unreachable!("handled before configuration load"),
         },
         Command::Project(project) => {

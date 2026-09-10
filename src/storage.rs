@@ -2564,36 +2564,6 @@ pub async fn export_events(settings: &ConnectionSettings) -> Result<EventExport,
     export_events_from(&client).await
 }
 
-pub async fn export_snapshot_sources(
-    settings: &ConnectionSettings,
-) -> Result<
-    (
-        EventExport,
-        TodoExport,
-        HashMap<Uuid, Option<DateTime<Utc>>>,
-    ),
-    StorageError,
-> {
-    let (mut client, _) = connect(settings).await?;
-    let tx = client
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .start()
-        .await
-        .map_err(StorageError::Query)?;
-    let events = export_events_from(&tx).await?;
-    let todos = export_todos_from(&tx).await?;
-    let todo_deleted = tx
-        .query("SELECT id, deleted_at FROM todos ORDER BY id", &[])
-        .await
-        .map_err(StorageError::Query)?
-        .into_iter()
-        .map(|row| (row.get(0), row.get(1)))
-        .collect();
-    tx.commit().await.map_err(StorageError::Query)?;
-    Ok((events, todos, todo_deleted))
-}
-
 /// Import a fully validated calendar/event document atomically without overwriting.
 /// Write one complete event row inside an open transaction.
 async fn insert_event_row(
