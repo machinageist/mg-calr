@@ -231,6 +231,107 @@ fn rejects_stale_and_conflicting_replacements() {
 }
 
 #[test]
+fn rejects_a_global_purge_notice_without_record_scoped_evidence() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("projection.json");
+    TodoProjectionSnapshot::validate(snapshot())
+        .unwrap()
+        .store(&path)
+        .unwrap();
+
+    let mut purged = snapshot();
+    purged.producer_revision = 8;
+    purged.created_at = "2026-08-25T12:00:00Z".parse().unwrap();
+    purged.records.clear();
+    purged.completeness.expected_records = 0;
+    purged.diagnostics = vec![Diagnostic {
+        severity: "info".to_owned(),
+        code: "purged_absence".to_owned(),
+        message: "Purged rows are absent from the authority export.".to_owned(),
+    }];
+    assert!(matches!(
+        TodoProjectionSnapshot::validate(purged).unwrap().store(&path),
+        Err(ProjectionError::Incomplete(message)) if message.contains("disappeared")
+    ));
+}
+
+#[test]
+fn rejects_a_disappeared_record_without_a_purge_diagnostic() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("projection.json");
+    TodoProjectionSnapshot::validate(snapshot())
+        .unwrap()
+        .store(&path)
+        .unwrap();
+
+    let mut unexplained = snapshot();
+    unexplained.producer_revision = 8;
+    unexplained.created_at = "2026-08-25T12:00:00Z".parse().unwrap();
+    unexplained.records.clear();
+    unexplained.completeness.expected_records = 0;
+    unexplained.diagnostics.clear();
+    assert!(matches!(
+        TodoProjectionSnapshot::validate(unexplained).unwrap().store(&path),
+        Err(ProjectionError::Incomplete(message)) if message.contains("disappeared")
+    ));
+}
+
+#[test]
+fn rejects_a_purge_explanation_when_a_blocking_diagnostic_is_also_present() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("projection.json");
+    TodoProjectionSnapshot::validate(snapshot())
+        .unwrap()
+        .store(&path)
+        .unwrap();
+
+    let mut mixed = snapshot();
+    mixed.producer_revision = 8;
+    mixed.created_at = "2026-08-25T12:00:00Z".parse().unwrap();
+    mixed.records.clear();
+    mixed.completeness.expected_records = 0;
+    mixed.diagnostics = vec![
+        Diagnostic {
+            severity: "info".to_owned(),
+            code: "purged_absence".to_owned(),
+            message: "Purged rows are absent from the authority export.".to_owned(),
+        },
+        Diagnostic {
+            severity: "warning".to_owned(),
+            code: "partial_read".to_owned(),
+            message: "A shard did not respond.".to_owned(),
+        },
+    ];
+    assert!(matches!(
+        TodoProjectionSnapshot::validate(mixed).unwrap().store(&path),
+        Err(ProjectionError::Incomplete(message)) if message.contains("disappeared")
+    ));
+}
+
+#[test]
+fn rejects_a_disappeared_record_when_a_diagnostic_reports_something_worse() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("projection.json");
+    let projection = TodoProjectionSnapshot::validate(snapshot()).unwrap();
+    projection.store(&path).unwrap();
+
+    let mut degraded = snapshot();
+    degraded.producer_revision = 8;
+    degraded.created_at = "2026-08-25T12:00:00Z".parse().unwrap();
+    degraded.records.clear();
+    degraded.completeness.expected_records = 0;
+    degraded.diagnostics = vec![Diagnostic {
+        severity: "warning".to_owned(),
+        code: "partial_read".to_owned(),
+        message: "a shard did not respond".to_owned(),
+    }];
+    assert!(matches!(
+        TodoProjectionSnapshot::validate(degraded).unwrap().store(&path),
+        Err(ProjectionError::Incomplete(message)) if message.contains("disappeared")
+    ));
+}
+
+#[test]
 fn rejects_invalid_lifecycle_combinations() {
     let mut value = snapshot();
     value.records[0].lifecycle.state = "trashed".to_owned();

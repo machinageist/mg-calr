@@ -528,6 +528,9 @@ impl TodoProjectionSnapshot {
                 .iter()
                 .map(|record| record.global_id.as_str())
                 .collect();
+            // A purge notice is global and carries no record identities. It cannot
+            // safely authorize subset disappearance, so retain the previous store
+            // until the producer supplies record-scoped evidence.
             if let Some(disappeared) = existing
                 .snapshot
                 .records
