@@ -1,144 +1,72 @@
-use mg_calr::storage::{
-    EVENT_RECURRENCE_MIGRATION, FOUNDATION_MIGRATION, MIGRATIONS,
-    REMINDER_DELIVERY_LEDGER_MIGRATION, REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION,
-    REPAIR_TODO_RECURRENCE_MIGRATION, TODO_CORE_MIGRATION, TODO_RECURRENCE_MIGRATION,
-};
+// Author: Jeff
+// Date: 2026-09-20
+// Description: What mg-calr's embedded schema is allowed to be — append-only, and exactly the
+//              tables each migration claims
+// Notes: The PostgreSQL store reached nine migrations because each shipped separately. The
+//        SQLite store starts from two, and the rules that kept those nine honest still hold
+
+use mg_calr::storage::{FOUNDATION_SQL, MIGRATIONS, PROJECTS_AND_TAGS_SQL};
 
 #[test]
-fn foundation_migration_is_embedded_and_covers_only_foundation_entities() {
-    assert_eq!(MIGRATIONS.len(), 9);
+fn the_foundation_owns_calendars_and_events_and_nothing_else() {
+    assert_eq!(MIGRATIONS.len(), 2);
     assert_eq!(MIGRATIONS[0].version, 1);
-    assert_eq!(MIGRATIONS[0].sql, FOUNDATION_MIGRATION);
+    assert_eq!(MIGRATIONS[0].name, "foundation");
+    assert_eq!(MIGRATIONS[0].sql, FOUNDATION_SQL);
+    assert_eq!(MIGRATIONS[0].tables, ["calendars", "events"]);
 
-    for table in [
-        "calendars",
-        "events",
-        "todos",
-        "reminders",
-        "reminder_deliveries",
-        "audit_log",
-    ] {
-        assert!(
-            FOUNDATION_MIGRATION.contains(&format!("CREATE TABLE {table}")),
-            "missing foundation table {table}"
+    assert_eq!(MIGRATIONS[1].version, 2);
+    assert_eq!(MIGRATIONS[1].name, "projects_and_tags");
+    assert_eq!(MIGRATIONS[1].sql, PROJECTS_AND_TAGS_SQL);
+    assert_eq!(MIGRATIONS[1].tables, ["projects", "tags"]);
+}
+
+#[test]
+fn every_migration_creates_exactly_the_tables_its_ledger_entry_names() {
+    for migration in MIGRATIONS {
+        for table in migration.tables {
+            assert!(
+                migration.sql.contains(&format!("CREATE TABLE {table}")),
+                "migration {} claims {table} without creating it",
+                migration.version
+            );
+        }
+        assert_eq!(
+            migration.sql.matches("CREATE TABLE ").count(),
+            migration.tables.len(),
+            "migration {} creates a table its ledger entry does not name",
+            migration.version
         );
     }
+}
 
-    assert!(!FOUNDATION_MIGRATION.contains("DROP TABLE"));
-    assert!(!FOUNDATION_MIGRATION.contains("CREATE EXTENSION"));
+#[test]
+fn migrations_are_append_only_and_never_destructive() {
+    for migration in MIGRATIONS {
+        // IF NOT EXISTS would let an edited migration pass over a store it does not match
+        assert!(!migration.sql.contains("IF NOT EXISTS"));
+        assert!(!migration.sql.contains("DROP "));
+        assert!(!migration.sql.contains("DELETE FROM"));
+        assert!(!migration.sql.contains("ALTER TABLE"));
+    }
+}
+
+#[test]
+fn the_foundation_keeps_the_invariants_the_domain_relies_on() {
+    // one event is wholly timed or wholly all-day, which is what EventTime is
+    assert!(FOUNDATION_SQL.contains("CHECK ((timezone IS NOT NULL AND starts_at IS NOT NULL"));
+    assert!(FOUNDATION_SQL.contains("CHECK (ends_at IS NULL OR ends_at > starts_at)"));
+    assert!(FOUNDATION_SQL.contains("CHECK (version >= 1)"));
+    // one live default calendar, and a deleted one releases the claim
+    assert!(FOUNDATION_SQL.contains("CREATE UNIQUE INDEX calendars_one_default"));
+    // two spellings of one name cannot become two records
+    assert!(PROJECTS_AND_TAGS_SQL.contains("projects_normalized_name_unique"));
+    assert!(PROJECTS_AND_TAGS_SQL.contains("tags_normalized_name_unique"));
 }
 
 #[test]
 fn migration_versions_are_strictly_increasing_and_unique() {
     for pair in MIGRATIONS.windows(2) {
         assert!(pair[0].version < pair[1].version);
-    }
-}
-
-#[test]
-fn todo_core_migration_owns_project_schema_without_rewriting_history() {
-    assert!(TODO_CORE_MIGRATION.contains("CREATE TABLE IF NOT EXISTS projects"));
-    assert!(TODO_CORE_MIGRATION.contains("normalized_name"));
-    assert!(TODO_CORE_MIGRATION.contains("projects_normalized_name_unique"));
-    assert!(TODO_CORE_MIGRATION.contains("ALTER TABLE todos ADD COLUMN IF NOT EXISTS project_id"));
-    assert!(!TODO_CORE_MIGRATION.contains("DROP TABLE projects"));
-}
-
-#[test]
-fn recurrence_history_is_preserved_and_append_only_repair_converts_legacy_text_json() {
-    assert_eq!(MIGRATIONS[2].version, 3);
-    assert_eq!(MIGRATIONS[2].sql, TODO_RECURRENCE_MIGRATION);
-    assert_eq!(MIGRATIONS[5].version, 6);
-    assert_eq!(MIGRATIONS[5].sql, REPAIR_TODO_RECURRENCE_MIGRATION);
-    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("ALTER COLUMN recurrence_rule TYPE jsonb"));
-    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("recurrence_rule::jsonb"));
-    assert!(REPAIR_TODO_RECURRENCE_MIGRATION.contains("todos_recurrence_rule_check"));
-    assert!(!REPAIR_TODO_RECURRENCE_MIGRATION.contains("DROP TABLE"));
-}
-
-#[test]
-fn reminder_migration_bridges_delivery_identity_without_external_transport() {
-    let sql = mg_calr::storage::TODO_REMINDERS_MIGRATION;
-    assert!(sql.contains("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeatable"));
-    assert!(sql.contains("reminders_todo_schedule_unique"));
-    assert!(sql.contains("WITH duplicate_deliveries AS"));
-    assert!(sql.contains("DELETE FROM reminder_deliveries delivery"));
-    assert!(sql.contains("earlier.id < delivery.id"));
-    assert!(sql.contains("UPDATE reminder_deliveries delivery"));
-    assert!(sql.contains("MIN(id::text)::uuid AS keeper_id"));
-    assert!(sql.contains("duplicate.id <> canonical.keeper_id"));
-    assert!(mg_calr::storage::FOUNDATION_MIGRATION.contains("UNIQUE (reminder_id, scheduled_for)"));
-    assert!(!sql.to_ascii_lowercase().contains("notify"));
-}
-
-#[test]
-fn legacy_todo_authority_migration_is_append_only_and_preserves_event_reminders() {
-    assert_eq!(MIGRATIONS[8].version, 9);
-    assert_eq!(MIGRATIONS[8].name, "remove_legacy_todo_authority");
-    assert_eq!(MIGRATIONS[8].sql, REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION);
-    for table in ["todo_reminders", "todo_tags", "todo_dependencies", "todos"] {
-        assert!(
-            REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION
-                .contains(&format!("DROP TABLE IF EXISTS {table}"))
-        );
-    }
-    assert!(!REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION.contains("DROP TABLE IF EXISTS reminders"));
-    assert!(
-        !REMOVE_LEGACY_TODO_AUTHORITY_MIGRATION
-            .contains("DROP TABLE IF EXISTS reminder_deliveries")
-    );
-}
-
-#[test]
-fn reminder_delivery_ledger_is_append_only_and_claim_keyed() {
-    assert_eq!(MIGRATIONS[6].version, 7);
-    assert_eq!(MIGRATIONS[6].name, "reminder_delivery_ledger");
-    assert_eq!(MIGRATIONS[6].sql, REMINDER_DELIVERY_LEDGER_MIGRATION);
-    for contract in [
-        "reminder_deliveries_claim_key",
-        "schedule_ref",
-        "occurrence_key",
-        "claim_fence",
-        "ON DELETE SET NULL",
-        "backfilled_before_delivery_existed",
-        "reminder_digests",
-        "reminder_dnd_windows",
-        "reminder_scanner_runs",
-    ] {
-        assert!(REMINDER_DELIVERY_LEDGER_MIGRATION.contains(contract));
-    }
-    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DROP TABLE"));
-    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("DELETE FROM"));
-    assert!(!REMINDER_DELIVERY_LEDGER_MIGRATION.contains("transport"));
-}
-
-#[test]
-fn event_recurrence_migration_converts_the_unused_text_column_append_only() {
-    let migration = MIGRATIONS
-        .iter()
-        .find(|migration| migration.version == 8)
-        .expect("event recurrence migration is embedded");
-    assert_eq!(migration.name, "event_recurrence");
-    assert_eq!(migration.sql, EVENT_RECURRENCE_MIGRATION);
-
-    // Converted in place rather than dropped, and no schedule is invented
-    assert!(EVENT_RECURRENCE_MIGRATION.contains("ALTER TABLE events"));
-    assert!(EVENT_RECURRENCE_MIGRATION.contains("ALTER COLUMN recurrence_rule TYPE jsonb"));
-    assert!(EVENT_RECURRENCE_MIGRATION.contains("events_recurrence_rule_check"));
-    assert!(!EVENT_RECURRENCE_MIGRATION.contains("DROP TABLE"));
-    assert!(!EVENT_RECURRENCE_MIGRATION.contains("DROP COLUMN"));
-    assert!(!EVENT_RECURRENCE_MIGRATION.contains("INSERT INTO"));
-    assert!(!EVENT_RECURRENCE_MIGRATION.contains("UPDATE events"));
-
-    // The shape check mirrors the one migration 6 established for todos
-    for clause in [
-        "jsonb_typeof(recurrence_rule) = 'object'",
-        "? 'frequency'",
-        "? 'interval'",
-    ] {
-        assert!(
-            EVENT_RECURRENCE_MIGRATION.contains(clause),
-            "missing {clause}"
-        );
     }
 }

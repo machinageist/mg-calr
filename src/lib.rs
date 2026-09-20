@@ -54,30 +54,14 @@ impl AppError {
             Self::Storage(storage::StorageError::InvalidConfiguration(_)) => {
                 "database_config_invalid"
             }
-            Self::Storage(storage::StorageError::Connect(_)) => "database_unavailable",
+            Self::Storage(storage::StorageError::Open(_)) => "database_unavailable",
             Self::Storage(storage::StorageError::MigrationDrift { .. }) => "migration_drift",
             Self::Storage(storage::StorageError::CalendarNotLive { .. }) => "calendar_not_live",
-            Self::Storage(storage::StorageError::TodoNotFound { .. })
-            | Self::TodoNotFound { .. } => "todo_not_found",
-            Self::Storage(storage::StorageError::TodoHasChildren { .. }) => "todo_has_children",
-            Self::Storage(storage::StorageError::TodoNotTrashed { .. }) => "todo_not_trashed",
+            Self::TodoNotFound { .. } => "todo_not_found",
             Self::Storage(storage::StorageError::ProjectNotFound { .. }) => "project_not_found",
-            Self::Storage(storage::StorageError::ParentNotFound { .. }) => "parent_not_found",
-            Self::Storage(storage::StorageError::SelfParent { .. }) => "todo_self_parent",
-            Self::Storage(storage::StorageError::Cycle { .. }) => "todo_parent_cycle",
-            Self::Storage(storage::StorageError::DependencyNotFound { .. }) => {
-                "todo_dependency_not_found"
-            }
-            Self::Storage(storage::StorageError::SelfDependency { .. }) => "todo_self_dependency",
-            Self::Storage(storage::StorageError::DependencyCycle { .. }) => "todo_dependency_cycle",
             Self::Storage(storage::StorageError::TagAlreadyExists { .. }) => "tag_already_exists",
             Self::Storage(storage::StorageError::TagNotFound { .. }) => "tag_not_found",
-            Self::Storage(storage::StorageError::TodoVersionConflict { .. }) => {
-                "todo_version_conflict"
-            }
             Self::Storage(storage::StorageError::InvalidStoredData(_)) => "stored_data_invalid",
-            Self::Storage(storage::StorageError::InvalidRecurrence { .. }) => "recurrence_invalid",
-            Self::Storage(storage::StorageError::InvalidReminder { .. }) => "reminder_invalid",
             Self::Storage(storage::StorageError::ImportInvalid { .. }) => "import_invalid",
             Self::Storage(storage::StorageError::ImportConflict { .. }) => "import_conflict",
             Self::Storage(storage::StorageError::Query(_)) => "database_error",
@@ -116,27 +100,16 @@ impl AppError {
             | Self::Projection(interop::ProjectionError::Invalid(_))
             | Self::InvalidInput(_)
             | Self::Storage(storage::StorageError::TagAlreadyExists { .. })
-            | Self::Storage(storage::StorageError::TodoHasChildren { .. })
-            | Self::Storage(storage::StorageError::SelfParent { .. })
-            | Self::Storage(storage::StorageError::Cycle { .. })
-            | Self::Storage(storage::StorageError::SelfDependency { .. })
-            | Self::Storage(storage::StorageError::DependencyCycle { .. })
-            | Self::Storage(storage::StorageError::InvalidRecurrence { .. })
-            | Self::Storage(storage::StorageError::InvalidReminder { .. })
             | Self::Storage(storage::StorageError::ImportInvalid { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
-            | Self::Storage(storage::StorageError::TodoNotTrashed { .. })
             | Self::Storage(storage::StorageError::TagNotFound { .. })
-            | Self::Storage(storage::StorageError::ProjectNotFound { .. })
-            | Self::Storage(storage::StorageError::ParentNotFound { .. })
-            | Self::Storage(storage::StorageError::DependencyNotFound { .. }) => 66,
+            | Self::Storage(storage::StorageError::ProjectNotFound { .. }) => 66,
             Self::Config(_) => 78,
             Self::Projection(interop::ProjectionError::Missing)
             | Self::Projection(interop::ProjectionError::Read(_))
             | Self::Projection(interop::ProjectionError::Write(_)) => 74,
-            Self::Storage(storage::StorageError::TodoVersionConflict { .. })
-            | Self::EventVersionConflict { .. }
+            Self::EventVersionConflict { .. }
             | Self::Storage(storage::StorageError::EventVersionConflict { .. }) => 75,
             Self::Storage(_) => 69,
             Self::Serialization(_) => 70,

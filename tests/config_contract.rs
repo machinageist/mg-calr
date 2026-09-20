@@ -56,33 +56,49 @@ fn xdg_paths_fall_back_under_home() {
 }
 
 #[test]
-fn database_url_precedence_is_cli_then_environment_then_file_then_peer_default() {
+fn store_path_precedence_is_cli_then_environment_then_file_then_the_data_directory() {
     let vars = env(&[
         ("HOME", "/home/tester"),
         ("USER", "tester"),
-        ("DATABASE_URL", "postgresql:///env"),
+        ("MG_CALR_DB", "/home/tester/env.sqlite"),
     ]);
     let file = r#"[database]
-url = "postgresql:///file"
+path = "/home/tester/file.sqlite"
 "#;
 
-    let from_cli = resolve_config(&vars, Some(file), Some("postgresql:///cli".to_owned()))
-        .expect("CLI config");
+    let from_cli = resolve_config(
+        &vars,
+        Some(file),
+        Some(PathBuf::from("/home/tester/cli.sqlite")),
+    )
+    .expect("CLI config");
     assert_eq!(from_cli.database.source(), ConfigSource::Cli);
+    assert_eq!(
+        from_cli.database.path(),
+        PathBuf::from("/home/tester/cli.sqlite")
+    );
 
     let from_env = resolve_config(&vars, Some(file), None).expect("environment config");
     assert_eq!(from_env.database.source(), ConfigSource::Environment);
-
-    let mut no_url_env = vars;
-    no_url_env.remove("DATABASE_URL");
-    let from_file = resolve_config(&no_url_env, Some(file), None).expect("file config");
-    assert_eq!(from_file.database.source(), ConfigSource::File);
-
-    let from_default = resolve_config(&no_url_env, None, None).expect("peer default");
-    assert_eq!(from_default.database.source(), ConfigSource::Default);
-    assert_eq!(from_default.database.dbname(), "mg_calr");
     assert_eq!(
-        from_default.database.socket_dir(),
-        Some(PathBuf::from("/run/postgresql").as_path())
+        from_env.database.path(),
+        PathBuf::from("/home/tester/env.sqlite")
+    );
+
+    let mut no_env = vars;
+    no_env.remove("MG_CALR_DB");
+    let from_file = resolve_config(&no_env, Some(file), None).expect("file config");
+    assert_eq!(from_file.database.source(), ConfigSource::File);
+    assert_eq!(
+        from_file.database.path(),
+        PathBuf::from("/home/tester/file.sqlite")
+    );
+
+    // nothing configured: one file under the XDG data directory, which needs no provisioning
+    let from_default = resolve_config(&no_env, None, None).expect("default config");
+    assert_eq!(from_default.database.source(), ConfigSource::Default);
+    assert_eq!(
+        from_default.database.path(),
+        PathBuf::from("/home/tester/.local/share/mg-calr/calr.sqlite")
     );
 }

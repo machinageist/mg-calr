@@ -71,68 +71,36 @@ pub enum ConfigSource {
     Default,
 }
 
+/// Where the one SQLite file lives, and what said so.
 #[derive(Debug, Clone)]
-pub enum ConnectionSettings {
-    Url {
-        url: String,
-        source: ConfigSource,
-    },
-    Peer {
-        socket_dir: PathBuf,
-        user: Option<String>,
-        dbname: String,
-        source: ConfigSource,
-    },
+pub struct StoreSettings {
+    pub path: PathBuf,
+    pub source: ConfigSource,
 }
 
-impl ConnectionSettings {
+impl StoreSettings {
     #[must_use]
     pub const fn source(&self) -> ConfigSource {
-        match self {
-            Self::Url { source, .. } | Self::Peer { source, .. } => *source,
-        }
+        self.source
     }
 
     #[must_use]
-    pub fn dbname(&self) -> &str {
-        match self {
-            Self::Url { .. } => "from_url",
-            Self::Peer { dbname, .. } => dbname,
-        }
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    #[must_use]
-    pub fn socket_dir(&self) -> Option<&Path> {
-        match self {
-            Self::Url { .. } => None,
-            Self::Peer { socket_dir, .. } => Some(socket_dir),
-        }
-    }
-
+    /// A description safe to print: a path this user already knows, and where it came from.
     #[must_use]
     pub fn safe_summary(&self) -> String {
-        match self {
-            Self::Url { source, .. } => {
-                format!("PostgreSQL URL ({source:?}; credentials redacted)")
-            }
-            Self::Peer {
-                socket_dir,
-                user,
-                dbname,
-                source,
-            } => format!(
-                "Unix socket {} database {dbname} user {} ({source:?})",
-                socket_dir.display(),
-                user.as_deref().unwrap_or("current OS user")
-            ),
-        }
+        let source = self.source;
+        format!("SQLite store {} ({source:?})", self.path.display())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub paths: ConfigPaths,
-    pub database: ConnectionSettings,
+    pub database: StoreSettings,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -143,10 +111,7 @@ struct FileConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct FileDatabase {
-    url: Option<String>,
-    socket_dir: Option<PathBuf>,
-    user: Option<String>,
-    dbname: Option<String>,
+    path: Option<PathBuf>,
 }
 
 /// Resolve the complete application configuration with documented precedence.
@@ -157,41 +122,30 @@ struct FileDatabase {
 pub fn resolve_config<S: std::hash::BuildHasher>(
     vars: &HashMap<String, String, S>,
     file_contents: Option<&str>,
-    cli_database_url: Option<String>,
+    cli_store_path: Option<PathBuf>,
 ) -> Result<AppConfig, ConfigError> {
     let paths = ConfigPaths::from_env(vars)?;
     let file = file_contents.map_or_else(|| Ok(FileConfig::default()), toml::from_str)?;
-    let database = if let Some(url) = cli_database_url {
-        ConnectionSettings::Url {
-            url,
+    // the argument wins, then the environment, then the file, then the XDG data directory
+    let database = if let Some(path) = cli_store_path {
+        StoreSettings {
+            path,
             source: ConfigSource::Cli,
         }
-    } else if let Some(url) = vars.get("DATABASE_URL") {
-        ConnectionSettings::Url {
-            url: url.clone(),
+    } else if let Some(path) = vars.get(crate::storage::DB_PATH_ENV) {
+        StoreSettings {
+            path: PathBuf::from(path),
             source: ConfigSource::Environment,
         }
-    } else if let Some(url) = file.database.url {
-        ConnectionSettings::Url {
-            url,
+    } else if let Some(path) = file.database.path {
+        StoreSettings {
+            path,
             source: ConfigSource::File,
         }
     } else {
-        let has_file_override = file.database.socket_dir.is_some()
-            || file.database.user.is_some()
-            || file.database.dbname.is_some();
-        ConnectionSettings::Peer {
-            socket_dir: file
-                .database
-                .socket_dir
-                .unwrap_or_else(|| PathBuf::from("/run/postgresql")),
-            user: file.database.user.or_else(|| vars.get("USER").cloned()),
-            dbname: file.database.dbname.unwrap_or_else(|| "mg_calr".to_owned()),
-            source: if has_file_override {
-                ConfigSource::File
-            } else {
-                ConfigSource::Default
-            },
+        StoreSettings {
+            path: paths.data_dir.join(crate::storage::DEFAULT_DB_FILE),
+            source: ConfigSource::Default,
         }
     };
     Ok(AppConfig { paths, database })
@@ -202,7 +156,7 @@ pub fn resolve_config<S: std::hash::BuildHasher>(
 /// # Errors
 ///
 /// Returns an error for unresolved XDG paths, unreadable files, or invalid TOML.
-pub fn load(cli_database_url: Option<String>) -> Result<AppConfig, ConfigError> {
+pub fn load(cli_store_path: Option<PathBuf>) -> Result<AppConfig, ConfigError> {
     let vars = std::env::vars().collect::<HashMap<_, _>>();
     let paths = ConfigPaths::from_env(&vars)?;
     let contents = match fs::read_to_string(&paths.config_file) {
@@ -215,5 +169,5 @@ pub fn load(cli_database_url: Option<String>) -> Result<AppConfig, ConfigError> 
             });
         }
     };
-    resolve_config(&vars, contents.as_deref(), cli_database_url)
+    resolve_config(&vars, contents.as_deref(), cli_store_path)
 }

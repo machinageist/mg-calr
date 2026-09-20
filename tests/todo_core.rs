@@ -3,7 +3,6 @@ use std::str::FromStr;
 use chrono::{DateTime, NaiveDate};
 use mg_calr::application::TodoQueryProjection;
 use mg_calr::domain::todo::{Priority, ProjectId, TagId, Todo, TodoDue, TodoError, TodoId};
-use mg_calr::storage::MIGRATIONS;
 
 fn instant(value: &str) -> DateTime<chrono::FixedOffset> {
     value.parse().expect("valid RFC3339 fixture")
@@ -79,36 +78,6 @@ fn todo_validation_and_projection_are_serializable() {
     assert_eq!(value["todo"]["title"], "Write tests");
     assert_eq!(value["blocked"], true);
     assert_eq!(value["unmet_prerequisite_count"], 2);
-}
-
-#[test]
-fn todo_core_migration_is_ordered_and_non_destructive() {
-    assert_eq!(
-        MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
-    );
-    assert_eq!(MIGRATIONS[1].name, "todo_core");
-    let sql = MIGRATIONS[1].sql;
-    for table in [
-        "projects",
-        "tags",
-        "todos",
-        "todo_tags",
-        "todo_dependencies",
-    ] {
-        assert!(sql.contains(table), "migration mentions {table}");
-    }
-    assert!(sql.contains("ADD COLUMN IF NOT EXISTS"));
-    assert!(sql.contains("ON DELETE CASCADE"));
-    assert!(!sql.to_ascii_lowercase().contains("drop table"));
-    assert!(!sql.to_ascii_lowercase().contains("delete from"));
-    assert!(sql.contains("priority"));
-    assert!(sql.contains("due_representation_check"));
-    assert!(sql.contains("dependent_id"));
-    assert!(sql.contains("prerequisite_id"));
-    assert!(sql.contains("information_schema.columns"));
-    assert!(sql.contains("pg_constraint"));
-    assert!(sql.contains("migration refused"));
 }
 
 #[test]

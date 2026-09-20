@@ -1,36 +1,44 @@
+// Author: Jeff
+// Date: 2026-09-20
+// Description: How the store is allowed to talk to SQLite — parameters, transactions, and the
+//              order in which a lifecycle write checks things
+// Notes: These read the source, because the point is the shape of the statements, not their
+//        results. Statements are never built with format!: a value reaches SQLite as a bound
+//        parameter or not at all
+
 use std::fs;
 
-#[test]
-fn postgres_repository_contract_uses_transactional_parameterized_inserts() {
-    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
-
-    assert!(source.contains("let transaction = client.transaction().await"));
-    assert!(source.contains("SELECT deleted_at IS NULL FROM calendars WHERE id = $1 FOR UPDATE"));
-    assert!(source.contains("INSERT INTO calendars"));
-    assert!(source.contains("INSERT INTO events"));
-    assert!(source.contains("VALUES ($1, $2, $3, $4, $5, $6, $7)"));
-    assert!(source.contains("VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10"));
-    assert!(source.contains("transaction.commit().await"));
-    assert!(!source.contains("format!(\"INSERT"));
-    assert!(!source.contains("format!(\"SELECT"));
+fn storage_source() -> String {
+    fs::read_to_string("src/storage.rs").expect("storage source is available")
 }
 
 #[test]
-fn postgres_read_contract_is_parameterized_and_deterministically_ordered() {
-    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+fn writes_are_transactional_and_parameterized() {
+    let source = storage_source();
 
-    assert!(source.contains("WHERE e.id = $1"));
-    assert!(source.contains("$1::uuid IS NULL OR e.calendar_id = $1"));
-    assert!(source.contains("e.all_day_start < $2"));
-    assert!(source.contains("e.starts_at < $4"));
+    assert!(source.contains("transaction_with_behavior(TransactionBehavior::Immediate)"));
+    assert!(source.contains("INSERT INTO calendars"));
+    assert!(source.contains("INSERT INTO events"));
+    assert!(source.contains("transaction.commit()"));
+    // a calendar must be live before an event may point at it, checked inside the write
+    assert!(source.contains("SELECT deleted_at IS NULL FROM calendars WHERE id = ?1"));
+    assert!(!source.contains("format!(\"INSERT"));
+    assert!(!source.contains("format!(\"UPDATE events"));
+}
+
+#[test]
+fn reads_are_parameterized_and_deterministically_ordered() {
+    let source = storage_source();
+
+    assert!(source.contains("WHERE e.id = ?1"));
     assert!(source.contains("ORDER BY lower(name), id"));
     assert!(source.contains("lower(e.title), e.id"));
     assert!(!source.contains("format!(\"SELECT"));
 }
 
 #[test]
-fn repository_preserves_standard_event_fields_in_storage_contract() {
-    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+fn every_standard_event_field_is_persisted() {
+    let source = storage_source();
 
     for field in [
         "rfc_uid",
@@ -59,44 +67,25 @@ fn repository_preserves_standard_event_fields_in_storage_contract() {
 }
 
 #[test]
-fn event_cancel_contract_is_parameterized_and_version_guarded() {
-    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
+fn a_lifecycle_write_answers_the_lifecycle_before_the_version() {
+    let source = storage_source();
 
-    assert!(source.contains("pub async fn cancel_event"));
-    assert!(source.contains("SELECT version, deleted_at FROM events WHERE id = $1 FOR UPDATE"));
-    assert!(source.contains("UPDATE events SET deleted_at = CURRENT_TIMESTAMP"));
+    assert!(source.contains("pub fn cancel_event"));
+    assert!(source.contains("pub fn restore_event"));
+    assert!(source.contains("SELECT version, deleted_at FROM events WHERE id = ?1"));
     assert!(source.contains("version = version + 1"));
-    assert!(source.contains("AND deleted_at IS NULL AND version = $2"));
-    assert!(source.contains("EventVersionConflict"));
-    assert!(source.contains("EventNotFound"));
-    let cancelled_check = source
-        .find("if row.get::<_, Option<DateTime<Utc>>>(1).is_some()")
-        .expect("cancel checks deleted events");
-    let version_check = source
-        .find("if actual_version != expected_version")
-        .expect("cancel checks optimistic version");
-    assert!(cancelled_check < version_check);
-    assert!(!source.contains("format!(\"UPDATE events"));
-}
+    assert!(source.contains("WHERE id = ?1 AND version = ?2"));
 
-#[test]
-fn event_restore_contract_is_parameterized_and_version_guarded() {
-    let source = fs::read_to_string("src/storage.rs").expect("storage source is available");
-
-    assert!(source.contains("pub async fn restore_event"));
-    assert!(source.contains("UPDATE events SET deleted_at = NULL"));
-    assert!(source.contains("AND deleted_at IS NOT NULL AND version = $2"));
-    assert!(source.contains("EventVersionConflict"));
-    assert!(source.contains("EventNotFound"));
-    let restore_source = &source[source
-        .find("pub async fn restore_event")
-        .expect("restore implementation exists")..];
-    let cancelled_check = restore_source
-        .find("if row.get::<_, Option<DateTime<Utc>>>(1).is_none()")
-        .expect("restore checks cancelled events");
-    let version_check = restore_source
+    // a caller holding a stale version is told what is actually wrong: that the event
+    // is already cancelled, or already live, rather than that its version is old
+    let write = &source[source
+        .find("fn set_event_deletion")
+        .expect("the shared lifecycle write exists")..];
+    let lifecycle_check = write
+        .find("if deleted_at.is_some() == cancelling")
+        .expect("the write checks lifecycle");
+    let version_check = write
         .find("if actual_version != expected_version")
-        .expect("restore checks optimistic version");
-    assert!(cancelled_check < version_check);
-    assert!(!source.contains("format!(\"UPDATE events"));
+        .expect("the write checks the optimistic version");
+    assert!(lifecycle_check < version_check);
 }

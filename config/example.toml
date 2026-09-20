@@ -1,9 +1,6 @@
 [database]
-# Default values shown explicitly. Omit this section to use them.
-socket_dir = "/run/postgresql"
-dbname = "mg_calr"
-# user = "your-os-user"
+# Where the one SQLite file lives. Omit this section for the default,
+# $XDG_DATA_HOME/mg-calr/calr.sqlite.
+# path = "/home/your-os-user/.local/share/mg-calr/calr.sqlite"
 
-# A URL is optional and takes precedence over peer fields in this file.
-# Prefer DATABASE_URL for temporary overrides. Never commit credentials.
-# url = "postgresql:///mg_calr"
+# MG_CALR_DB overrides this file for one run, and --db overrides both.

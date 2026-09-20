@@ -1,6 +1,6 @@
 use std::fmt::Display;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 
@@ -17,8 +17,7 @@ use mg_calr::domain::{
     CalendarId, Event, EventFrequency, EventId, EventRecurrence, EventTime, RfcUid,
 };
 use mg_calr::storage::{
-    self, AgendaRepositoryError, MigrationState, PostgresCalendarEventRepository,
-    PostgresProjectRepository, ProjectionAgendaRepository, StorageError,
+    self, AgendaRepositoryError, MigrationState, ProjectionAgendaRepository, StorageError, Store,
 };
 use mg_calr::tui::TuiState;
 use mg_calr::{AppError, Envelope, ErrorBody, ErrorEnvelope};
@@ -36,9 +35,9 @@ struct Cli {
     /// Disable ANSI color. `NO_COLOR` also disables color.
     #[arg(long, global = true)]
     no_color: bool,
-    /// Override the PostgreSQL connection.
-    #[arg(long, global = true, value_name = "URL")]
-    database_url: Option<String>,
+    /// Override the store file; `MG_CALR_DB` does the same.
+    #[arg(long, global = true, value_name = "PATH")]
+    db: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -544,16 +543,12 @@ fn application_error(error: ApplicationError<StorageError>) -> AppError {
 }
 
 /// Restore a document this application previously exported.
-async fn import_export_document(
-    database: &config::ConnectionSettings,
-    file: &PathBuf,
-    json: bool,
-) -> Result<(), AppError> {
+fn import_export_document(store_path: &Path, file: &PathBuf, json: bool) -> Result<(), AppError> {
     let input = std::fs::read_to_string(file).map_err(|_| StorageError::ImportInvalid {
         reason: "could not read import file".to_owned(),
     })?;
     let payload = storage::EventExport::parse(&input)?;
-    let count = storage::import_events(database, &payload).await?;
+    let count = Store::open(store_path)?.import_events(&payload)?;
     print_debug(
         json,
         "event.import",
@@ -562,8 +557,8 @@ async fn import_export_document(
 }
 
 /// Read an iCalendar file and add every event it holds to one calendar.
-async fn import_ics(
-    database: &config::ConnectionSettings,
+fn import_ics(
+    store_path: &Path,
     file: &PathBuf,
     calendar: CalendarId,
     json: bool,
@@ -573,7 +568,7 @@ async fn import_ics(
         .iter()
         .filter(|event| event.metadata.recurrence_rule.is_some())
         .count();
-    let count = storage::import_ics_events(database, calendar, &events).await?;
+    let count = Store::open(store_path)?.import_ics_events(calendar, &events)?;
     print_debug(
         json,
         "event.import-ics",
@@ -653,13 +648,12 @@ fn event_lifecycle_error(error: EventLifecycleError<StorageError>) -> AppError {
     }
 }
 
-async fn run_calendar_command(
+fn run_calendar_command(
     args: &CalendarArgs,
-    database: config::ConnectionSettings,
+    store_path: &Path,
     json: bool,
     no_input: bool,
 ) -> Result<(), AppError> {
-    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database));
     match &args.command {
         CalendarCommand::Create(args) => {
             let name = required(
@@ -668,23 +662,24 @@ async fn run_calendar_command(
                 "calendar name",
                 "Calendar name",
             )?;
-            let calendar = app
-                .create_calendar_async(name)
-                .await
+            let calendar = EventUseCases::new(Store::open(store_path)?)
+                .create_calendar(name)
                 .map_err(application_error)?;
             print_projection(json, "calendar.create", CalendarProjection::from(calendar))
         }
         CalendarCommand::List => print_projections(
             json,
             "calendar.list",
-            app.list_calendars_async().await.map_err(query_error)?,
+            EventUseCases::new(Store::open(store_path)?)
+                .list_calendars()
+                .map_err(query_error)?,
         ),
     }
 }
 
-async fn run_event_command(
+fn run_event_command(
     args: &EventArgs,
-    database: config::ConnectionSettings,
+    store_path: &Path,
     json: bool,
     no_input: bool,
 ) -> Result<(), AppError> {
@@ -713,13 +708,16 @@ async fn run_event_command(
             ));
         }
     }
-    let app = EventUseCases::new(PostgresCalendarEventRepository::new(database.clone()));
+    // opened per command, after its own input is understood, so bad input never
+    // creates a store and `import` reports a bad file rather than a missing one
+    let app = || -> Result<EventUseCases<Store>, AppError> {
+        Ok(EventUseCases::new(Store::open(store_path)?))
+    };
     match &args.command {
         EventCommand::Create(_) => {
             let (calendar_id, title, time, recurrence) = create_input.expect("create input exists");
-            let event = app
-                .create_repeating_event_async(calendar_id, title, time, recurrence)
-                .await
+            let event = app()?
+                .create_repeating_event(calendar_id, title, time, recurrence)
                 .map_err(application_error)?;
             print_projection(json, "event.create", EventProjection::from(event))
         }
@@ -730,85 +728,80 @@ async fn run_event_command(
             print_projection(
                 json,
                 "event.edit",
-                app.edit_event_async(args.event_id, args.version, edit)
-                    .await
+                app()?
+                    .edit_event(args.event_id, args.version, &edit)
                     .map_err(application_error)?,
             )
         }
         EventCommand::Show { event_id } => print_projection(
             json,
             "event.show",
-            app.show_event_async(*event_id).await.map_err(query_error)?,
+            app()?.show_event(*event_id).map_err(query_error)?,
         ),
         EventCommand::List { calendar } => print_projections(
             json,
             "event.list",
-            app.list_events_async(*calendar)
-                .await
-                .map_err(query_error)?,
+            app()?.list_events(*calendar).map_err(query_error)?,
         ),
         EventCommand::DayAgenda { date, timezone } => print_projections(
             json,
             "event.day-agenda",
-            app.day_agenda_async(*date, timezone)
-                .await
-                .map_err(query_error)?,
+            app()?.day_agenda(*date, timezone).map_err(query_error)?,
         ),
         EventCommand::Cancel { event_id, version } => print_projection(
             json,
             "event.cancel",
-            app.cancel_event_async(*event_id, *version)
-                .await
+            app()?
+                .cancel_event(*event_id, *version)
                 .map_err(event_lifecycle_error)?,
         ),
         EventCommand::Restore { event_id, version } => print_projection(
             json,
             "event.restore",
-            app.restore_event_async(*event_id, *version)
-                .await
+            app()?
+                .restore_event(*event_id, *version)
                 .map_err(event_lifecycle_error)?,
         ),
         EventCommand::Export => {
-            let payload = storage::export_events(&database).await?;
+            let payload = Store::open(store_path)?.export_events()?;
             println!("{}", serde_json::to_string(&payload)?);
             Ok(())
         }
-        EventCommand::ImportIcs { file, calendar } => {
-            import_ics(&database, file, *calendar, json).await
-        }
-        EventCommand::Import { file } => import_export_document(&database, file, json).await,
+        EventCommand::ImportIcs { file, calendar } => import_ics(store_path, file, *calendar, json),
+        EventCommand::Import { file } => import_export_document(store_path, file, json),
     }
 }
 
-async fn run_project_command(
+fn run_project_command(
     args: &ProjectArgs,
-    database: config::ConnectionSettings,
+    store_path: &Path,
     json: bool,
     no_input: bool,
 ) -> Result<(), AppError> {
-    let app = ProjectUseCases::new(PostgresProjectRepository::new(database));
     match &args.command {
         ProjectCommand::Create { name } => {
             let name = required(name.clone(), no_input, "project name", "Project name")?;
             print_projection(
                 json,
                 "project.create",
-                app.create_project_async(name)
-                    .await
+                ProjectUseCases::new(Store::open(store_path)?)
+                    .create_project(name)
                     .map_err(application_error)?,
             )
         }
         ProjectCommand::List => print_projections(
             json,
             "project.list",
-            app.list_projects_async().await.map_err(query_error)?,
+            ProjectUseCases::new(Store::open(store_path)?)
+                .list_projects()
+                .map_err(query_error)?,
         ),
     }
 }
 
-async fn run_agenda_command(
+fn run_agenda_command(
     args: &AgendaArgs,
-    database: config::ConnectionSettings,
+    store_path: &Path,
     default_projection: PathBuf,
     json: bool,
 ) -> Result<(), AppError> {
@@ -823,12 +816,12 @@ async fn run_agenda_command(
     query.include_trashed = args.include_trashed;
     query.include_blocked = args.include_blocked;
 
+    // the window is checked first, so an impossible one is refused without a store
     let output = AgendaUseCases::new(ProjectionAgendaRepository::new(
-        PostgresCalendarEventRepository::new(database.clone()),
+        store_path,
         args.todo_projection.clone().unwrap_or(default_projection),
     ))
-    .query_async(query)
-    .await
+    .query(query)
     .map_err(agenda_query_error)?;
     print_agenda(json, output)
 }
@@ -897,11 +890,7 @@ fn format_agenda_item(item: &AgendaItem, zone: Option<Tz>) -> String {
     format!("  {when:<11}  {:<40}  {kind}{}", item.title, item.notes())
 }
 
-async fn run_tui(
-    args: &TuiArgs,
-    database: config::ConnectionSettings,
-    default_projection: PathBuf,
-) -> Result<(), AppError> {
+fn run_tui(args: &TuiArgs, store_path: &Path, default_projection: PathBuf) -> Result<(), AppError> {
     let start = args.start.unwrap_or_else(|| Utc::now().date_naive());
     let end = args.end.unwrap_or_else(|| start + chrono::Days::new(1));
     if start >= end {
@@ -910,18 +899,17 @@ async fn run_tui(
         ));
     }
     let todo_projection = args.todo_projection.clone().unwrap_or(default_projection);
-    let load = || async {
+    let load = || {
         let query =
             AgendaQuery::try_new(start, end, args.timezone.clone()).map_err(AppError::from)?;
         AgendaUseCases::new(ProjectionAgendaRepository::new(
-            PostgresCalendarEventRepository::new(database.clone()),
+            store_path,
             todo_projection.clone(),
         ))
-        .query_async(query)
-        .await
+        .query(query)
         .map_err(agenda_query_error)
     };
-    let mut agenda = load().await?;
+    let mut agenda = load()?;
     let mut state = TuiState::new();
     let stdin = io::stdin();
     let mut input = stdin.lock();
@@ -931,7 +919,7 @@ async fn run_tui(
         state.apply(mg_calr::tui::Key::parse(&line), agenda.items.len());
         line.clear();
         if state.take_refresh_request() {
-            agenda = load().await?;
+            agenda = load()?;
             state.complete_refresh(agenda.items.len());
         }
         if state.should_quit() {
@@ -968,7 +956,7 @@ fn run_todo_projection_import(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run(cli: &Cli) -> Result<(), AppError> {
+fn run(cli: &Cli) -> Result<(), AppError> {
     let _color_disabled = cli.no_color || std::env::var_os("NO_COLOR").is_some();
     if let Command::Interop(InteropArgs {
         command: InteropCommand::ImportTodo { input, store },
@@ -976,7 +964,10 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
     {
         return run_todo_projection_import(cli, input, store);
     }
-    let app_config = config::load(cli.database_url.clone())?;
+    let app_config = config::load(cli.db.clone())?;
+    // opened only where a command needs it, so anything the input itself rules out is
+    // reported without creating a store; opening never migrates either
+    let store = || -> Result<Store, AppError> { Ok(Store::open(app_config.database.path())?) };
     let default_todo_projection = app_config.paths.data_dir.join("todo-projection.json");
 
     match &cli.command {
@@ -992,14 +983,8 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
         }) => print_debug(cli.json, "config.paths", app_config.paths),
         Command::Database(database) => {
             let (command, migrations) = match database.command {
-                DatabaseCommand::Migrate => (
-                    "database.migrate",
-                    storage::migrate(&app_config.database).await?,
-                ),
-                DatabaseCommand::Status => (
-                    "database.status",
-                    storage::migration_status(&app_config.database).await?,
-                ),
+                DatabaseCommand::Migrate => ("database.migrate", store()?.migrate()?),
+                DatabaseCommand::Status => ("database.status", store()?.migration_status()?),
             };
             print_debug(
                 cli.json,
@@ -1011,7 +996,7 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
             )
         }
         Command::Doctor => {
-            let migrations = storage::doctor(&app_config.database).await?;
+            let migrations = store()?.migration_status()?;
             print_debug(
                 cli.json,
                 "doctor",
@@ -1024,11 +1009,11 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
             )
         }
         Command::Init => {
-            let (database_reachable, migrations) = match storage::doctor(&app_config.database).await
-            {
-                Ok(migrations) => (true, migrations),
-                Err(_) => (false, Vec::new()),
-            };
+            let (database_reachable, migrations) =
+                match store().and_then(|store| Ok(store.migration_status()?)) {
+                    Ok(migrations) => (true, migrations),
+                    Err(_) => (false, Vec::new()),
+                };
             print_debug(
                 cli.json,
                 "init",
@@ -1036,65 +1021,54 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
                     connection: app_config.database.safe_summary(),
                     database_reachable,
                     migrations,
+                    // nothing to provision any more: the store is a file this user owns
                     administrator_guidance: vec![
-                        "Install PostgreSQL 18 using the operating system package manager.".to_owned(),
-                        "Administrator example: sudo -u postgres createuser --login \"$USER\"".to_owned(),
-                        "Administrator example: sudo -u postgres createdb --owner \"$USER\" mg_calr".to_owned(),
-                        "Then, as the unprivileged application user: mg-calr database migrate".to_owned(),
-                        "Review commands before running them; mg-calr never invokes sudo or provisions roles/databases.".to_owned(),
+                        "Run `mg-calr database migrate` to create or update the store.".to_owned(),
                     ],
                 },
             )
         }
         Command::Calendar(calendar) => {
-            run_calendar_command(calendar, app_config.database, cli.json, cli.no_input).await
+            run_calendar_command(calendar, app_config.database.path(), cli.json, cli.no_input)
         }
         Command::Event(event) => {
-            run_event_command(event, app_config.database, cli.json, cli.no_input).await
+            run_event_command(event, app_config.database.path(), cli.json, cli.no_input)
         }
-        Command::Agenda(agenda) => {
-            run_agenda_command(
-                agenda,
-                app_config.database,
-                default_todo_projection,
-                cli.json,
-            )
-            .await
-        }
+        Command::Agenda(agenda) => run_agenda_command(
+            agenda,
+            app_config.database.path(),
+            default_todo_projection,
+            cli.json,
+        ),
         Command::Interop(interop) => match &interop.command {
             InteropCommand::ImportTodo { .. } => unreachable!("handled before configuration load"),
         },
         Command::Project(project) => {
-            run_project_command(project, app_config.database, cli.json, cli.no_input).await
+            run_project_command(project, app_config.database.path(), cli.json, cli.no_input)
         }
         Command::Tag(tag) => {
-            let app = TagUseCases::new(storage::PostgresTagRepository::new(app_config.database));
+            let app = TagUseCases::new(store()?);
             match &tag.command {
                 TagCommand::Create { name } => {
                     let name = required(name.clone(), cli.no_input, "tag name", "Tag name")?;
                     print_projection(
                         cli.json,
                         "tag.create",
-                        app.create_tag_async(name)
-                            .await
-                            .map_err(application_error)?,
+                        app.create_tag(name).map_err(application_error)?,
                     )
                 }
-                TagCommand::List => print_projections(
-                    cli.json,
-                    "tag.list",
-                    app.list_tags_async().await.map_err(query_error)?,
-                ),
+                TagCommand::List => {
+                    print_projections(cli.json, "tag.list", app.list_tags().map_err(query_error)?)
+                }
             }
         }
-        Command::Tui(args) => run_tui(args, app_config.database, default_todo_projection).await,
+        Command::Tui(args) => run_tui(args, app_config.database.path(), default_todo_projection),
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli).await {
+    match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if cli.json {

@@ -1,9 +1,7 @@
 use std::convert::Infallible;
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
-use mg_calr::application::{
-    AsyncCalendarEventRepository, EventEdit, EventUseCases, QueryError, RepositoryFuture,
-};
+use mg_calr::application::{CalendarEventRepository, EventEdit, EventUseCases, QueryError};
 use mg_calr::domain::{Calendar, CalendarId, Event, EventId, EventTime};
 
 fn instant(value: &str) -> DateTime<FixedOffset> {
@@ -16,83 +14,61 @@ struct QueryRepository {
     events: Vec<Event>,
 }
 
-impl AsyncCalendarEventRepository for QueryRepository {
+impl CalendarEventRepository for QueryRepository {
     type Error = Infallible;
 
-    fn save_calendar<'a>(
-        &'a self,
-        _calendar: &'a Calendar,
-    ) -> RepositoryFuture<'a, (), Self::Error> {
-        Box::pin(async { Ok(()) })
+    fn save_calendar(&self, _calendar: &Calendar) -> Result<(), Self::Error> {
+        Ok(())
     }
 
-    fn save_event<'a>(&'a self, _event: &'a Event) -> RepositoryFuture<'a, (), Self::Error> {
-        Box::pin(async { Ok(()) })
+    fn save_event(&self, _event: &Event) -> Result<(), Self::Error> {
+        Ok(())
     }
 
-    fn list_calendars(&self) -> RepositoryFuture<'_, Vec<Calendar>, Self::Error> {
-        Box::pin(async { Ok(self.calendars.clone()) })
+    fn list_calendars(&self) -> Result<Vec<Calendar>, Self::Error> {
+        Ok(self.calendars.clone())
     }
 
-    fn find_event(&self, id: EventId) -> RepositoryFuture<'_, Option<Event>, Self::Error> {
-        Box::pin(async move { Ok(self.events.iter().find(|event| event.id == id).cloned()) })
+    fn find_event(&self, id: EventId) -> Result<Option<Event>, Self::Error> {
+        Ok(self.events.iter().find(|event| event.id == id).cloned())
     }
 
-    fn list_events(
-        &self,
-        calendar_id: Option<CalendarId>,
-    ) -> RepositoryFuture<'_, Vec<Event>, Self::Error> {
-        Box::pin(async move {
-            let mut events = self.events.clone();
-            events.retain(|event| calendar_id.is_none_or(|id| event.calendar_id == id));
-            Ok(events)
-        })
+    fn list_events(&self, calendar_id: Option<CalendarId>) -> Result<Vec<Event>, Self::Error> {
+        let mut events = self.events.clone();
+        events.retain(|event| calendar_id.is_none_or(|id| event.calendar_id == id));
+        Ok(events)
     }
 
-    fn cancel_event(
-        &self,
-        id: EventId,
-        _expected_version: i64,
-    ) -> RepositoryFuture<'_, Event, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .events
-                .iter()
-                .find(|event| event.id == id)
-                .cloned()
-                .unwrap())
-        })
+    fn cancel_event(&self, id: EventId, _expected_version: i64) -> Result<Event, Self::Error> {
+        Ok(self
+            .events
+            .iter()
+            .find(|event| event.id == id)
+            .cloned()
+            .unwrap())
     }
 
-    fn restore_event(
+    fn restore_event(&self, id: EventId, _expected_version: i64) -> Result<Event, Self::Error> {
+        Ok(self
+            .events
+            .iter()
+            .find(|event| event.id == id)
+            .cloned()
+            .unwrap())
+    }
+
+    fn edit_event(
         &self,
         id: EventId,
         _expected_version: i64,
-    ) -> RepositoryFuture<'_, Event, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .events
-                .iter()
-                .find(|event| event.id == id)
-                .cloned()
-                .unwrap())
-        })
-    }
-
-    fn edit_event<'a>(
-        &'a self,
-        id: EventId,
-        _expected_version: i64,
-        _edit: &'a EventEdit,
-    ) -> RepositoryFuture<'a, Event, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .events
-                .iter()
-                .find(|event| event.id == id)
-                .cloned()
-                .unwrap())
-        })
+        _edit: &EventEdit,
+    ) -> Result<Event, Self::Error> {
+        Ok(self
+            .events
+            .iter()
+            .find(|event| event.id == id)
+            .cloned()
+            .unwrap())
     }
 
     fn day_agenda(
@@ -101,26 +77,24 @@ impl AsyncCalendarEventRepository for QueryRepository {
         _timezone: &str,
         _starts_at: DateTime<FixedOffset>,
         _ends_at: DateTime<FixedOffset>,
-    ) -> RepositoryFuture<'_, Vec<Event>, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .events
-                .iter()
-                .filter(|event| match event.time {
-                    EventTime::AllDay {
-                        start,
-                        end_exclusive,
-                    } => start <= date && end_exclusive > date,
-                    EventTime::Timed { .. } => true,
-                })
-                .cloned()
-                .collect())
-        })
+    ) -> Result<Vec<Event>, Self::Error> {
+        Ok(self
+            .events
+            .iter()
+            .filter(|event| match event.time {
+                EventTime::AllDay {
+                    start,
+                    end_exclusive,
+                } => start <= date && end_exclusive > date,
+                EventTime::Timed { .. } => true,
+            })
+            .cloned()
+            .collect())
     }
 }
 
-#[tokio::test]
-async fn application_queries_return_shared_serializable_projections() {
+#[test]
+fn application_queries_return_shared_serializable_projections() {
     let calendar = Calendar::new("Work").unwrap();
     let event = Event::new(
         calendar.id,
@@ -140,14 +114,13 @@ async fn application_queries_return_shared_serializable_projections() {
     };
     let app = EventUseCases::new(repository);
 
-    let listed = app.list_events_async(None).await.unwrap();
-    let shown = app.show_event_async(event_id).await.unwrap();
+    let listed = app.list_events(None).unwrap();
+    let shown = app.show_event(event_id).unwrap();
     let agenda = app
-        .day_agenda_async(
+        .day_agenda(
             NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             "America/Los_Angeles",
         )
-        .await
         .unwrap();
 
     assert_eq!(listed, vec![shown.clone()]);
@@ -156,33 +129,32 @@ async fn application_queries_return_shared_serializable_projections() {
     assert!(shown.to_string().contains("Standup"));
 }
 
-#[tokio::test]
-async fn missing_event_is_a_typed_query_error() {
+#[test]
+fn missing_event_is_a_typed_query_error() {
     let app = EventUseCases::new(QueryRepository::default());
     let id = EventId::new();
 
-    let error = app.show_event_async(id).await.unwrap_err();
+    let error = app.show_event(id).unwrap_err();
 
     assert!(matches!(error, QueryError::EventNotFound { event_id } if event_id == id));
 }
 
-#[tokio::test]
-async fn day_agenda_rejects_unknown_iana_timezone_before_repository_access() {
+#[test]
+fn day_agenda_rejects_unknown_iana_timezone_before_repository_access() {
     let app = EventUseCases::new(QueryRepository::default());
 
     let error = app
-        .day_agenda_async(
+        .day_agenda(
             NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
             "Mars/Olympus",
         )
-        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("valid IANA timezone"));
 }
 
-#[tokio::test]
-async fn application_enforces_total_order_on_unordered_repository_results() {
+#[test]
+fn application_enforces_total_order_on_unordered_repository_results() {
     let zeta = Calendar::new("zeta").unwrap();
     let alpha = Calendar::new("Alpha").unwrap();
     let timed_late = Event::new(
@@ -223,7 +195,7 @@ async fn application_enforces_total_order_on_unordered_repository_results() {
         events: vec![timed_late, timed_early, all_day],
     });
 
-    let calendars = app.list_calendars_async().await.unwrap();
+    let calendars = app.list_calendars().unwrap();
     assert_eq!(
         calendars
             .iter()
@@ -231,14 +203,13 @@ async fn application_enforces_total_order_on_unordered_repository_results() {
             .collect::<Vec<_>>(),
         ["Alpha", "zeta"]
     );
-    let events = app.list_events_async(None).await.unwrap();
+    let events = app.list_events(None).unwrap();
     assert_eq!(
         events.iter().map(|event| event.id).collect::<Vec<_>>(),
         expected_event_ids
     );
     let agenda = app
-        .day_agenda_async(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(), "US/Pacific")
-        .await
+        .day_agenda(NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(), "US/Pacific")
         .unwrap();
     assert_eq!(
         agenda.iter().map(|event| event.id).collect::<Vec<_>>(),

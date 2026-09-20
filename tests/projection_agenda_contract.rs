@@ -269,8 +269,8 @@ fn agenda_cli_reports_stale_projection_without_leaking_its_path() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            "/nonexistent/mg-calr-test/calr.sqlite",
             "agenda",
             "--todo-projection",
         ])
@@ -305,8 +305,8 @@ fn agenda_cli_reports_projection_conflict_without_leaking_its_path() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            "/nonexistent/mg-calr-test/calr.sqlite",
             "agenda",
             "--todo-projection",
         ])
@@ -327,17 +327,18 @@ fn agenda_cli_reports_projection_conflict_without_leaking_its_path() {
 }
 
 #[test]
-fn agenda_repository_source_has_no_legacy_todo_database_read() {
+fn agenda_repository_source_reads_todos_only_from_the_projection() {
     let source = include_str!("../src/storage.rs");
     let implementation = source
-        .split("impl AsyncAgendaRepository for ProjectionAgendaRepository")
+        .split("impl AgendaRepository for ProjectionAgendaRepository")
         .nth(1)
         .expect("projection agenda repository implementation");
     let implementation = implementation
-        .split("/// Export all todo-related state")
+        .split("// ── Row and value helpers ──")
         .next()
         .unwrap();
     assert!(implementation.contains("TodoProjectionSnapshot::load"));
-    assert!(!implementation.contains("PostgresTodoRepository"));
-    assert!(!implementation.contains("list_todos_with_trashed"));
+    // the todos table this application once owned is gone; nothing here may read one
+    assert!(!implementation.contains("FROM todos"));
+    assert!(!implementation.contains("list_todos"));
 }

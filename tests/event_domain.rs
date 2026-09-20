@@ -1,6 +1,7 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
-use mg_calr::application::{CalendarEventRepository, EventUseCases};
+use mg_calr::application::EventUseCases;
 use mg_calr::domain::{Calendar, CalendarId, DomainError, Event, EventTime};
+use mg_calr::storage::Store;
 use serde_json::Value;
 
 fn instant(value: &str) -> DateTime<FixedOffset> {
@@ -130,29 +131,19 @@ fn domain_models_serialize_temporal_forms_and_metadata() {
     assert_eq!(decoded, event);
 }
 
-#[derive(Default)]
-struct MemoryRepository {
-    calendars: Vec<Calendar>,
-    events: Vec<Event>,
-}
-
-impl CalendarEventRepository for MemoryRepository {
-    type Error = std::convert::Infallible;
-
-    fn save_calendar(&mut self, calendar: Calendar) -> Result<(), Self::Error> {
-        self.calendars.push(calendar);
-        Ok(())
-    }
-
-    fn save_event(&mut self, event: Event) -> Result<(), Self::Error> {
-        self.events.push(event);
-        Ok(())
-    }
+// The store is a file this test owns, so the boundary can be exercised against the
+// real thing rather than a stand-in
+fn scratch() -> (tempfile::TempDir, Store) {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = Store::open(directory.path().join("calr.sqlite")).expect("store opens");
+    store.migrate().expect("store migrates");
+    (directory, store)
 }
 
 #[test]
-fn application_boundary_constructs_then_persists_without_transport() {
-    let mut app = EventUseCases::new(MemoryRepository::default());
+fn application_boundary_constructs_then_persists() {
+    let (_directory, store) = scratch();
+    let app = EventUseCases::new(store.clone());
     let calendar = app.create_calendar("Work").unwrap();
     let event = app
         .create_event(
@@ -167,14 +158,22 @@ fn application_boundary_constructs_then_persists_without_transport() {
         )
         .unwrap();
 
-    let repository = app.into_repository();
-    assert_eq!(repository.calendars, vec![calendar]);
-    assert_eq!(repository.events, vec![event]);
+    // the store keeps instants to the microsecond, so compare what it can hold
+    let calendars = store.list_calendars().unwrap();
+    assert_eq!(calendars.len(), 1);
+    assert_eq!(
+        (calendars[0].id, &calendars[0].name),
+        (calendar.id, &calendar.name)
+    );
+    let events = store.list_events(None).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!((events[0].id, &events[0].title), (event.id, &event.title));
 }
 
 #[test]
 fn invalid_event_title_is_rejected_before_repository_write() {
-    let mut app = EventUseCases::new(MemoryRepository::default());
+    let (_directory, store) = scratch();
+    let app = EventUseCases::new(store.clone());
     let calendar = app.create_calendar("Work").unwrap();
     let result = app.create_event(
         CalendarId::new(),
@@ -193,9 +192,13 @@ fn invalid_event_title_is_rejected_before_repository_write() {
             }
         ))
     ));
-    let repository = app.into_repository();
-    assert_eq!(repository.calendars, vec![calendar]);
-    assert!(repository.events.is_empty());
+    assert_eq!(
+        store.list_calendars().unwrap().len(),
+        1,
+        "the calendar is there"
+    );
+    assert_eq!(store.list_calendars().unwrap()[0].id, calendar.id);
+    assert!(store.list_events(None).unwrap().is_empty());
 }
 
 // Recurrence
@@ -420,7 +423,8 @@ fn a_backwards_window_is_refused() {
 
 #[test]
 fn a_repeating_event_is_created_with_its_rule_and_an_unusable_rule_is_refused() {
-    let mut app = EventUseCases::new(MemoryRepository::default());
+    let (_directory, store) = scratch();
+    let app = EventUseCases::new(store);
     let calendar = app.create_calendar("Study").unwrap();
 
     let time = EventTime::timed(

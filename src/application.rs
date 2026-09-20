@@ -2,8 +2,6 @@
 use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 
 use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, TimeZone, Timelike};
 use chrono_tz::Tz;
@@ -15,64 +13,42 @@ use crate::domain::{
     todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId, TodoReminder},
 };
 
-/// Boxed asynchronous repository operation used at the transport boundary.
-pub type RepositoryFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
-
-/// Transport-independent persistence boundary used by small synchronous tests.
+/// Persistence and query boundary for calendars and events, served by the store.
+///
+/// It was asynchronous while the transport was a PostgreSQL connection. A SQLite store is
+/// a file this process opens itself, so every call here returns its answer directly.
 pub trait CalendarEventRepository {
     type Error;
 
     /// # Errors
     /// Returns the repository's typed persistence error.
-    fn save_calendar(&mut self, calendar: Calendar) -> Result<(), Self::Error>;
+    fn save_calendar(&self, calendar: &Calendar) -> Result<(), Self::Error>;
     /// # Errors
     /// Returns the repository's typed persistence error.
-    fn save_event(&mut self, event: Event) -> Result<(), Self::Error>;
-}
-
-/// Asynchronous persistence/query boundary implemented by PostgreSQL.
-pub trait AsyncCalendarEventRepository {
-    type Error;
-
-    /// # Errors
-    /// Returns the repository's typed persistence error.
-    fn save_calendar<'a>(&'a self, calendar: &'a Calendar)
-    -> RepositoryFuture<'a, (), Self::Error>;
-    /// # Errors
-    /// Returns the repository's typed persistence error.
-    fn save_event<'a>(&'a self, event: &'a Event) -> RepositoryFuture<'a, (), Self::Error>;
+    fn save_event(&self, event: &Event) -> Result<(), Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn list_calendars(&self) -> RepositoryFuture<'_, Vec<Calendar>, Self::Error>;
+    fn list_calendars(&self) -> Result<Vec<Calendar>, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn find_event(&self, id: EventId) -> RepositoryFuture<'_, Option<Event>, Self::Error>;
+    fn find_event(&self, id: EventId) -> Result<Option<Event>, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn list_events(
-        &self,
-        calendar_id: Option<CalendarId>,
-    ) -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
-    fn cancel_event(
-        &self,
-        id: EventId,
-        expected_version: i64,
-    ) -> RepositoryFuture<'_, Event, Self::Error>;
+    fn list_events(&self, calendar_id: Option<CalendarId>) -> Result<Vec<Event>, Self::Error>;
     /// # Errors
     /// Returns a typed repository lifecycle error.
-    fn restore_event(
+    fn cancel_event(&self, id: EventId, expected_version: i64) -> Result<Event, Self::Error>;
+    /// # Errors
+    /// Returns a typed repository lifecycle error.
+    fn restore_event(&self, id: EventId, expected_version: i64) -> Result<Event, Self::Error>;
+    /// # Errors
+    /// Returns a typed repository lifecycle error.
+    fn edit_event(
         &self,
         id: EventId,
         expected_version: i64,
-    ) -> RepositoryFuture<'_, Event, Self::Error>;
-    /// # Errors
-    /// Returns a typed repository lifecycle error.
-    fn edit_event<'a>(
-        &'a self,
-        id: EventId,
-        expected_version: i64,
-        edit: &'a EventEdit,
-    ) -> RepositoryFuture<'a, Event, Self::Error>;
+        edit: &EventEdit,
+    ) -> Result<Event, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
     fn day_agenda(
@@ -81,7 +57,7 @@ pub trait AsyncCalendarEventRepository {
         timezone: &str,
         starts_at: DateTime<FixedOffset>,
         ends_at: DateTime<FixedOffset>,
-    ) -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+    ) -> Result<Vec<Event>, Self::Error>;
 }
 
 /// Explicitly supplied fields for one optimistic event edit.
@@ -99,40 +75,42 @@ impl EventEdit {
 }
 
 /// Read-only persistence boundary for one combined agenda snapshot.
-pub trait AsyncAgendaRepository {
+pub trait AgendaRepository {
     type Error;
 
     /// # Errors
     /// Returns the repository's typed query error.
-    fn agenda_events(&self, include_trashed: bool)
-    -> RepositoryFuture<'_, Vec<Event>, Self::Error>;
+    fn agenda_events(&self, include_trashed: bool) -> Result<Vec<Event>, Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn agenda_todos(
-        &self,
-        include_trashed: bool,
-    ) -> RepositoryFuture<'_, AgendaTodoSnapshot, Self::Error>;
+    fn agenda_todos(&self, include_trashed: bool) -> Result<AgendaTodoSnapshot, Self::Error>;
 }
 
-/// Asynchronous persistence boundary for project metadata.
-pub trait AsyncTagRepository {
-    type Error;
-    fn save_tag<'a>(&'a self, tag: &'a Tag) -> RepositoryFuture<'a, (), Self::Error>;
-    fn list_tags(&self) -> RepositoryFuture<'_, Vec<Tag>, Self::Error>;
-}
-
-pub trait AsyncProjectRepository {
+/// Persistence boundary for tag metadata.
+pub trait TagRepository {
     type Error;
 
     /// # Errors
     /// Returns the repository's typed persistence error.
-    fn save_project<'a>(&'a self, project: &'a Project) -> RepositoryFuture<'a, (), Self::Error>;
+    fn save_tag(&self, tag: &Tag) -> Result<(), Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn find_project(&self, id: ProjectId) -> RepositoryFuture<'_, Option<Project>, Self::Error>;
+    fn list_tags(&self) -> Result<Vec<Tag>, Self::Error>;
+}
+
+/// Persistence boundary for project metadata.
+pub trait ProjectRepository {
+    type Error;
+
+    /// # Errors
+    /// Returns the repository's typed persistence error.
+    fn save_project(&self, project: &Project) -> Result<(), Self::Error>;
     /// # Errors
     /// Returns the repository's typed query error.
-    fn list_projects(&self) -> RepositoryFuture<'_, Vec<Project>, Self::Error>;
+    fn find_project(&self, id: ProjectId) -> Result<Option<Project>, Self::Error>;
+    /// # Errors
+    /// Returns the repository's typed query error.
+    fn list_projects(&self) -> Result<Vec<Project>, Self::Error>;
 }
 
 #[derive(Debug, Error)]
@@ -886,25 +864,23 @@ impl<R> TagUseCases<R> {
 }
 impl<R> TagUseCases<R>
 where
-    R: AsyncTagRepository,
+    R: TagRepository,
     R::Error: std::error::Error + 'static,
 {
-    pub async fn create_tag_async(
+    pub fn create_tag(
         &self,
         name: impl Into<String>,
     ) -> Result<TagProjection, ApplicationError<R::Error>> {
         let tag = Tag::new(name)?;
         self.repository
             .save_tag(&tag)
-            .await
             .map_err(ApplicationError::Repository)?;
         Ok(TagProjection::from(tag))
     }
-    pub async fn list_tags_async(&self) -> Result<Vec<TagProjection>, QueryError<R::Error>> {
+    pub fn list_tags(&self) -> Result<Vec<TagProjection>, QueryError<R::Error>> {
         let mut tags = self
             .repository
             .list_tags()
-            .await
             .map_err(QueryError::Repository)?;
         tags.sort_by_cached_key(|tag| (tag.normalized_name.clone(), tag.id.as_uuid()));
         Ok(tags.into_iter().map(TagProjection::from).collect())
@@ -925,32 +901,28 @@ impl<R> ProjectUseCases<R> {
 
 impl<R> ProjectUseCases<R>
 where
-    R: AsyncProjectRepository,
+    R: ProjectRepository,
     R::Error: std::error::Error + 'static,
 {
     /// # Errors
     /// Returns domain validation or repository persistence errors.
-    pub async fn create_project_async(
+    pub fn create_project(
         &self,
         name: impl Into<String>,
     ) -> Result<ProjectProjection, ApplicationError<R::Error>> {
         let project = Project::new(name)?;
         self.repository
             .save_project(&project)
-            .await
             .map_err(ApplicationError::Repository)?;
         Ok(ProjectProjection::from(project))
     }
 
     /// # Errors
     /// Returns a repository query error.
-    pub async fn list_projects_async(
-        &self,
-    ) -> Result<Vec<ProjectProjection>, QueryError<R::Error>> {
+    pub fn list_projects(&self) -> Result<Vec<ProjectProjection>, QueryError<R::Error>> {
         let mut projects = self
             .repository
             .list_projects()
-            .await
             .map_err(QueryError::Repository)?;
         projects
             .sort_by_cached_key(|project| (project.normalized_name.clone(), project.id.as_uuid()));
@@ -959,13 +931,12 @@ where
 
     /// # Errors
     /// Returns a repository query error or [`QueryError::ProjectNotFound`].
-    pub async fn show_project_async(
+    pub fn show_project(
         &self,
         project_id: ProjectId,
     ) -> Result<ProjectProjection, QueryError<R::Error>> {
         self.repository
             .find_project(project_id)
-            .await
             .map_err(QueryError::Repository)?
             .map(ProjectProjection::from)
             .ok_or(QueryError::ProjectNotFound { project_id })
@@ -986,15 +957,12 @@ impl<R> AgendaUseCases<R> {
 
 impl<R> AgendaUseCases<R>
 where
-    R: AsyncAgendaRepository,
+    R: AgendaRepository,
     R::Error: std::error::Error + 'static,
 {
     /// Query events and todo recurrence instances, then apply lifecycle
     /// filters and deterministic ordering to the shared snapshot.
-    pub async fn query_async(
-        &self,
-        query: AgendaQuery,
-    ) -> Result<AgendaOutput, QueryError<R::Error>> {
+    pub fn query(&self, query: AgendaQuery) -> Result<AgendaOutput, QueryError<R::Error>> {
         let zone = query
             .timezone
             .parse::<Tz>()
@@ -1008,12 +976,10 @@ where
         let todos = self
             .repository
             .agenda_todos(query.include_trashed)
-            .await
             .map_err(QueryError::Repository)?;
         let events = self
             .repository
             .agenda_events(query.include_trashed)
-            .await
             .map_err(QueryError::Repository)?;
         AgendaOutput::from_projection(query, events, todos).map_err(map_agenda_error)
     }
@@ -1034,58 +1000,6 @@ impl<R> EventUseCases<R> {
     }
 }
 
-impl<R> EventUseCases<R>
-where
-    R: CalendarEventRepository,
-    R::Error: std::error::Error + 'static,
-{
-    /// # Errors
-    /// Returns domain validation or synchronous repository persistence errors.
-    pub fn create_calendar(
-        &mut self,
-        name: impl Into<String>,
-    ) -> Result<Calendar, ApplicationError<R::Error>> {
-        let calendar = Calendar::new(name)?;
-        self.repository
-            .save_calendar(calendar.clone())
-            .map_err(ApplicationError::Repository)?;
-        Ok(calendar)
-    }
-
-    /// # Errors
-    /// Returns domain validation or synchronous repository persistence errors.
-    pub fn create_event(
-        &mut self,
-        calendar_id: CalendarId,
-        title: impl Into<String>,
-        time: EventTime,
-    ) -> Result<Event, ApplicationError<R::Error>> {
-        self.create_repeating_event(calendar_id, title, time, None)
-    }
-
-    /// Create an event that may repeat.
-    ///
-    /// # Errors
-    /// Returns domain validation errors for the title, time, or repeat rule, and
-    /// synchronous repository persistence errors.
-    pub fn create_repeating_event(
-        &mut self,
-        calendar_id: CalendarId,
-        title: impl Into<String>,
-        time: EventTime,
-        recurrence: Option<EventRecurrence>,
-    ) -> Result<Event, ApplicationError<R::Error>> {
-        let mut event = Event::new(calendar_id, title, time)?;
-        if let Some(rule) = recurrence {
-            event.metadata.recurrence_rule = Some(validated_rule(rule, &event.time)?);
-        }
-        self.repository
-            .save_event(event.clone())
-            .map_err(ApplicationError::Repository)?;
-        Ok(event)
-    }
-}
-
 /// Refuse a rule that cannot produce its own first occurrence, before it is stored.
 fn validated_rule(rule: EventRecurrence, time: &EventTime) -> Result<EventRecurrence, DomainError> {
     rule.validate()?;
@@ -1099,33 +1013,31 @@ fn validated_rule(rule: EventRecurrence, time: &EventTime) -> Result<EventRecurr
 
 impl<R> EventUseCases<R>
 where
-    R: AsyncCalendarEventRepository,
+    R: CalendarEventRepository,
     R::Error: std::error::Error + 'static,
 {
     /// # Errors
     /// Returns domain validation or asynchronous repository persistence errors.
-    pub async fn create_calendar_async(
+    pub fn create_calendar(
         &self,
         name: impl Into<String>,
     ) -> Result<Calendar, ApplicationError<R::Error>> {
         let calendar = Calendar::new(name)?;
         self.repository
             .save_calendar(&calendar)
-            .await
             .map_err(ApplicationError::Repository)?;
         Ok(calendar)
     }
 
     /// # Errors
     /// Returns domain validation or asynchronous repository persistence errors.
-    pub async fn create_event_async(
+    pub fn create_event(
         &self,
         calendar_id: CalendarId,
         title: impl Into<String>,
         time: EventTime,
     ) -> Result<Event, ApplicationError<R::Error>> {
-        self.create_repeating_event_async(calendar_id, title, time, None)
-            .await
+        self.create_repeating_event(calendar_id, title, time, None)
     }
 
     /// Create an event that may repeat.
@@ -1133,7 +1045,7 @@ where
     /// # Errors
     /// Returns a domain error for an invalid title, time, or repeat rule, and a
     /// typed repository error when the write fails.
-    pub async fn create_repeating_event_async(
+    pub fn create_repeating_event(
         &self,
         calendar_id: CalendarId,
         title: impl Into<String>,
@@ -1146,20 +1058,16 @@ where
         }
         self.repository
             .save_event(&event)
-            .await
             .map_err(ApplicationError::Repository)?;
         Ok(event)
     }
 
     /// # Errors
     /// Returns a typed repository query error.
-    pub async fn list_calendars_async(
-        &self,
-    ) -> Result<Vec<CalendarProjection>, QueryError<R::Error>> {
+    pub fn list_calendars(&self) -> Result<Vec<CalendarProjection>, QueryError<R::Error>> {
         let mut items = self
             .repository
             .list_calendars()
-            .await
             .map_err(QueryError::Repository)?;
         items.sort_by_cached_key(|calendar| (calendar.name.to_lowercase(), calendar.id.as_uuid()));
         Ok(items.into_iter().map(CalendarProjection::from).collect())
@@ -1167,13 +1075,9 @@ where
 
     /// # Errors
     /// Returns a repository query error or [`QueryError::EventNotFound`].
-    pub async fn show_event_async(
-        &self,
-        event_id: EventId,
-    ) -> Result<EventProjection, QueryError<R::Error>> {
+    pub fn show_event(&self, event_id: EventId) -> Result<EventProjection, QueryError<R::Error>> {
         self.repository
             .find_event(event_id)
-            .await
             .map_err(QueryError::Repository)?
             .map(EventProjection::from)
             .ok_or(QueryError::EventNotFound { event_id })
@@ -1181,14 +1085,13 @@ where
 
     /// # Errors
     /// Returns a typed repository query error.
-    pub async fn list_events_async(
+    pub fn list_events(
         &self,
         calendar_id: Option<CalendarId>,
     ) -> Result<Vec<EventProjection>, QueryError<R::Error>> {
         let mut items = self
             .repository
             .list_events(calendar_id)
-            .await
             .map_err(QueryError::Repository)?;
         items.sort_by(compare_events);
         Ok(items.into_iter().map(EventProjection::from).collect())
@@ -1196,7 +1099,7 @@ where
 
     /// # Errors
     /// Returns a typed optimistic lifecycle error.
-    pub async fn cancel_event_async(
+    pub fn cancel_event(
         &self,
         event_id: EventId,
         expected_version: i64,
@@ -1206,14 +1109,13 @@ where
     {
         self.repository
             .cancel_event(event_id, expected_version)
-            .await
             .map(EventProjection::from)
             .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))
     }
 
     /// # Errors
     /// Returns a typed optimistic lifecycle error.
-    pub async fn restore_event_async(
+    pub fn restore_event(
         &self,
         event_id: EventId,
         expected_version: i64,
@@ -1223,18 +1125,17 @@ where
     {
         self.repository
             .restore_event(event_id, expected_version)
-            .await
             .map(EventProjection::from)
             .map_err(|error| error.map_event_lifecycle_error(event_id, expected_version))
     }
 
     /// Edit the title and/or complete explicit temporal form using the
     /// caller-supplied optimistic version.
-    pub async fn edit_event_async(
+    pub fn edit_event(
         &self,
         event_id: EventId,
         expected_version: i64,
-        edit: EventEdit,
+        edit: &EventEdit,
     ) -> Result<EventProjection, ApplicationError<R::Error>> {
         if expected_version < 1 {
             return Err(ApplicationError::Domain(DomainError::InvalidEventVersion));
@@ -1272,15 +1173,14 @@ where
             }
         }
         self.repository
-            .edit_event(event_id, expected_version, &edit)
-            .await
+            .edit_event(event_id, expected_version, edit)
             .map(EventProjection::from)
             .map_err(ApplicationError::Repository)
     }
 
     /// # Errors
     /// Returns a timezone/day-boundary validation error or repository query error.
-    pub async fn day_agenda_async(
+    pub fn day_agenda(
         &self,
         date: NaiveDate,
         timezone: &str,
@@ -1301,7 +1201,6 @@ where
         let mut items = self
             .repository
             .day_agenda(date, timezone, starts_at, ends_at)
-            .await
             .map_err(QueryError::Repository)?;
         items.sort_by(compare_events);
         Ok(items.into_iter().map(EventProjection::from).collect())

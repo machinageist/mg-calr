@@ -1,6 +1,10 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 
+/// A store path under a directory that cannot exist, so a command that reaches storage
+/// fails there — and one that validates its input first never gets that far.
+const UNWRITABLE_STORE: &str = "/nonexistent/mg-calr-test/calr.sqlite";
+
 #[test]
 fn event_import_help_exposes_file_argument() {
     cargo_bin_cmd!("mg-calr")
@@ -18,8 +22,8 @@ fn event_import_validates_before_database_access_and_hides_file_path() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "event",
             "import",
             "--file",
@@ -58,8 +62,8 @@ fn event_edit_rejects_partial_temporal_form_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "event",
             "edit",
             "--event-id",
@@ -128,8 +132,8 @@ fn agenda_reports_missing_projection_before_calendar_database_failure() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "agenda",
             "--todo-projection",
         ])
@@ -149,12 +153,7 @@ fn agenda_reports_missing_projection_before_calendar_database_failure() {
         .stderr(predicate::str::contains(missing.to_string_lossy().as_ref()).not());
 
     cargo_bin_cmd!("mg-calr")
-        .args([
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
-            "agenda",
-            "--todo-projection",
-        ])
+        .args(["--db", UNWRITABLE_STORE, "agenda", "--todo-projection"])
         .arg(&missing)
         .args([
             "--start",
@@ -178,8 +177,8 @@ fn agenda_rejects_invalid_window_and_timezone_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "agenda",
             "--start",
             "2026-08-25",
@@ -200,8 +199,8 @@ fn agenda_rejects_equal_window_without_database_access() {
     cargo_bin_cmd!("mg-calr")
         .args([
             "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "agenda",
             "--start",
             "2026-08-24",
@@ -272,12 +271,7 @@ fn invalid_configuration_is_a_stable_json_error() {
 #[test]
 fn init_reports_unavailable_database_without_failing_or_mutating() {
     cargo_bin_cmd!("mg-calr")
-        .args([
-            "--json",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
-            "init",
-        ])
+        .args(["--json", "--db", UNWRITABLE_STORE, "init"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"command\":\"init\""))
@@ -291,8 +285,8 @@ fn no_input_calendar_create_reports_missing_name_without_database_access() {
         .args([
             "--json",
             "--no-input",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "calendar",
             "create",
         ])
@@ -311,8 +305,8 @@ fn no_input_event_create_reports_missing_fields_without_database_access() {
         .args([
             "--json",
             "--no-input",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "event",
             "create",
         ])
@@ -404,8 +398,8 @@ fn no_input_project_create_reports_missing_name_without_database_access() {
         .args([
             "--json",
             "--no-input",
-            "--database-url",
-            "postgresql://127.0.0.1:1/mg_calr",
+            "--db",
+            UNWRITABLE_STORE,
             "project",
             "create",
         ])
