@@ -9,8 +9,10 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::domain::{
-    Calendar, CalendarId, DomainError, Event, EventId, EventRecurrence, EventTime,
+    Alarm, Calendar, CalendarId, DomainError, Event, EventId, EventRecurrence, EventStatus,
+    EventTime,
     todo::{Priority, Project, ProjectId, Tag, TagId, Todo, TodoDue, TodoId, TodoReminder},
+    validate_description, validate_location, validate_url,
 };
 
 /// Persistence and query boundary for calendars and events, served by the store.
@@ -60,17 +62,182 @@ pub trait CalendarEventRepository {
     ) -> Result<Vec<Event>, Self::Error>;
 }
 
+/// One optional field in an edit: leave it, set it, or clear it.
+///
+/// Clearing is a distinct intention from leaving a field alone, which is why
+/// this is not an `Option`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Change<T> {
+    #[default]
+    Keep,
+    Set(T),
+    Clear,
+}
+
+impl<T: Clone> Change<T> {
+    #[must_use]
+    pub const fn is_keep(&self) -> bool {
+        matches!(self, Self::Keep)
+    }
+
+    /// The value a field holds after this change is applied to `current`.
+    #[must_use]
+    pub fn resolve(&self, current: Option<&T>) -> Option<T> {
+        match self {
+            Self::Keep => current.cloned(),
+            Self::Set(value) => Some(value.clone()),
+            Self::Clear => None,
+        }
+    }
+}
+
 /// Explicitly supplied fields for one optimistic event edit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EventEdit {
     pub title: Option<String>,
     pub time: Option<EventTime>,
+    /// Move the event to another live calendar, keeping its identity and history.
+    pub calendar_id: Option<CalendarId>,
+    pub description: Change<String>,
+    pub location: Change<String>,
+    pub url: Change<String>,
+    pub busy: Option<bool>,
 }
 
 impl EventEdit {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.title.is_none() && self.time.is_none()
+        self.title.is_none()
+            && self.time.is_none()
+            && self.calendar_id.is_none()
+            && self.description.is_keep()
+            && self.location.is_keep()
+            && self.url.is_keep()
+            && self.busy.is_none()
+    }
+
+    /// Check every supplied value on its own, before any stored event is read.
+    ///
+    /// # Errors
+    /// Returns the first field that fails domain validation.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if let Some(title) = &self.title {
+            validate_title(title)?;
+        }
+        if let Some(time) = &self.time {
+            revalidate_time(time)?;
+        }
+        if let Change::Set(value) = &self.description {
+            validate_description(value.clone())?;
+        }
+        if let Change::Set(value) = &self.location {
+            validate_location(value.clone())?;
+        }
+        if let Change::Set(value) = &self.url {
+            validate_url(value.clone())?;
+        }
+        Ok(())
+    }
+
+    /// The event this edit produces from `current`, fully validated.
+    ///
+    /// A repeat rule is re-checked against the resulting time, so changing an
+    /// event's start cannot leave a rule that no longer produces its first
+    /// occurrence.
+    ///
+    /// # Errors
+    /// Returns a domain error for any invalid value or combination.
+    pub fn apply_to(&self, current: &Event) -> Result<Event, DomainError> {
+        self.validate()?;
+        let mut next = current.clone();
+        if let Some(title) = &self.title {
+            next.title.clone_from(title);
+        }
+        if let Some(time) = &self.time {
+            next.time = time.clone();
+        }
+        if let Some(calendar_id) = self.calendar_id {
+            next.calendar_id = calendar_id;
+        }
+        next.metadata.description = self
+            .description
+            .resolve(current.metadata.description.as_ref());
+        next.metadata.location = self.location.resolve(current.metadata.location.as_ref());
+        next.metadata.url = self.url.resolve(current.metadata.url.as_ref());
+        if let Some(busy) = self.busy {
+            next.metadata.busy = busy;
+        }
+        if let Some(rule) = next.metadata.recurrence_rule.take() {
+            next.metadata.recurrence_rule = Some(validated_rule(rule, &next.time)?);
+        }
+        Ok(next)
+    }
+}
+
+/// Optional detail supplied when an event is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventDetails {
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub url: Option<String>,
+    pub busy: bool,
+    pub recurrence: Option<EventRecurrence>,
+}
+
+impl Default for EventDetails {
+    fn default() -> Self {
+        Self {
+            description: None,
+            location: None,
+            url: None,
+            busy: true,
+            recurrence: None,
+        }
+    }
+}
+
+impl EventDetails {
+    /// Write validated detail onto a freshly created event.
+    ///
+    /// # Errors
+    /// Returns a domain error for any invalid value.
+    pub fn apply_to(self, event: &mut Event) -> Result<(), DomainError> {
+        event.metadata.description = self.description.map(validate_description).transpose()?;
+        event.metadata.location = self.location.map(validate_location).transpose()?;
+        event.metadata.url = self.url.map(validate_url).transpose()?;
+        event.metadata.busy = self.busy;
+        if let Some(rule) = self.recurrence {
+            event.metadata.recurrence_rule = Some(validated_rule(rule, &event.time)?);
+        }
+        Ok(())
+    }
+}
+
+/// Run the same title check event creation runs.
+fn validate_title(title: &str) -> Result<(), DomainError> {
+    Event::new(
+        CalendarId::new(),
+        title.to_owned(),
+        EventTime::all_day(
+            NaiveDate::MIN,
+            NaiveDate::MIN.succ_opt().unwrap_or(NaiveDate::MAX),
+        )?,
+    )
+    .map(|_| ())
+}
+
+/// Re-run the constructor checks on a time that may have been deserialized.
+fn revalidate_time(time: &EventTime) -> Result<(), DomainError> {
+    match time {
+        EventTime::Timed {
+            start,
+            end,
+            timezone,
+        } => EventTime::timed(*start, *end, timezone.clone()).map(|_| ()),
+        EventTime::AllDay {
+            start,
+            end_exclusive,
+        } => EventTime::all_day(*start, *end_exclusive).map(|_| ()),
     }
 }
 
@@ -229,6 +396,9 @@ impl fmt::Display for CalendarProjection {
 }
 
 /// Stable event query projection consumed by both human and JSON renderers.
+///
+/// Carries every field an editing surface needs, so a card can read one event
+/// and send back only what changed with the version it read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EventProjection {
     pub id: EventId,
@@ -237,6 +407,16 @@ pub struct EventProjection {
     pub time: EventTime,
     pub version: i64,
     pub cancelled: bool,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub url: Option<String>,
+    pub status: Option<EventStatus>,
+    pub busy: bool,
+    pub recurrence: Option<EventRecurrence>,
+    pub alarms: Vec<Alarm>,
+    pub categories: Vec<String>,
+    pub created_at: DateTime<chrono::Utc>,
+    pub updated_at: DateTime<chrono::Utc>,
 }
 
 impl From<Event> for EventProjection {
@@ -248,6 +428,16 @@ impl From<Event> for EventProjection {
             time: event.time,
             version: event.version,
             cancelled: event.deleted_at.is_some(),
+            description: event.metadata.description,
+            location: event.metadata.location,
+            url: event.metadata.url,
+            status: event.metadata.status,
+            busy: event.metadata.busy,
+            recurrence: event.metadata.recurrence_rule,
+            alarms: event.metadata.alarms,
+            categories: event.metadata.categories,
+            created_at: event.created_at,
+            updated_at: event.updated_at,
         }
     }
 }
@@ -1052,10 +1242,31 @@ where
         time: EventTime,
         recurrence: Option<EventRecurrence>,
     ) -> Result<Event, ApplicationError<R::Error>> {
+        self.create_detailed_event(
+            calendar_id,
+            title,
+            time,
+            EventDetails {
+                recurrence,
+                ..EventDetails::default()
+            },
+        )
+    }
+
+    /// Create an event with any of its optional detail.
+    ///
+    /// # Errors
+    /// Returns a domain error for an invalid title, time, text field, URL, or
+    /// repeat rule, and a typed repository error when the write fails.
+    pub fn create_detailed_event(
+        &self,
+        calendar_id: CalendarId,
+        title: impl Into<String>,
+        time: EventTime,
+        details: EventDetails,
+    ) -> Result<Event, ApplicationError<R::Error>> {
         let mut event = Event::new(calendar_id, title, time)?;
-        if let Some(rule) = recurrence {
-            event.metadata.recurrence_rule = Some(validated_rule(rule, &event.time)?);
-        }
+        details.apply_to(&mut event)?;
         self.repository
             .save_event(&event)
             .map_err(ApplicationError::Repository)?;

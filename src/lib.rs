@@ -73,7 +73,10 @@ impl AppError {
             | Self::Projection(interop::ProjectionError::Invalid(_)) => "projection_invalid",
             Self::Projection(interop::ProjectionError::Read(_)) => "projection_unavailable",
             Self::Projection(interop::ProjectionError::Write(_)) => "projection_write_failed",
-            Self::Domain(_) | Self::Todo(_) | Self::InvalidInput(_) => "invalid_input",
+            Self::Domain(_)
+            | Self::Todo(_)
+            | Self::InvalidInput(_)
+            | Self::Storage(storage::StorageError::InvalidEdit { .. }) => "invalid_input",
             Self::RequiredInput { .. } => "required_input_missing",
             Self::EventNotFound { .. }
             | Self::Storage(storage::StorageError::EventNotFound { .. }) => "event_not_found",
@@ -100,7 +103,8 @@ impl AppError {
             | Self::Projection(interop::ProjectionError::Invalid(_))
             | Self::InvalidInput(_)
             | Self::Storage(storage::StorageError::TagAlreadyExists { .. })
-            | Self::Storage(storage::StorageError::ImportInvalid { .. }) => 65,
+            | Self::Storage(storage::StorageError::ImportInvalid { .. })
+            | Self::Storage(storage::StorageError::InvalidEdit { .. }) => 65,
             Self::EventNotFound { .. }
             | Self::TodoNotFound { .. }
             | Self::Storage(storage::StorageError::TagNotFound { .. })

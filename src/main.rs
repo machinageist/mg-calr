@@ -9,8 +9,8 @@ use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use mg_calr::application::{
     AgendaItem, AgendaKind, AgendaOutput, AgendaQuery, AgendaUseCases, ApplicationError,
-    CalendarProjection, EventEdit, EventLifecycleError, EventProjection, EventUseCases,
-    ProjectUseCases, QueryError, TagUseCases,
+    CalendarProjection, Change, EventDetails, EventEdit, EventLifecycleError, EventProjection,
+    EventUseCases, ProjectUseCases, QueryError, TagUseCases,
 };
 use mg_calr::config;
 use mg_calr::domain::{
@@ -167,7 +167,7 @@ struct EventArgs {
 enum EventCommand {
     /// Create one explicit timed or all-day event.
     Create(EventCreateArgs),
-    /// Edit title and/or one complete temporal form using its current optimistic-lock version.
+    /// Edit an event's fields using its current optimistic-lock version.
     Edit(EventEditArgs),
     /// Show one live event by its full stable ID.
     Show { event_id: EventId },
@@ -269,9 +269,22 @@ struct EventCreateArgs {
         value_name = "DATE"
     )]
     until: Option<NaiveDate>,
+    /// Longer notes about the event; newlines are kept
+    #[arg(long, value_name = "TEXT")]
+    description: Option<String>,
+    /// Where the event happens
+    #[arg(long, value_name = "TEXT")]
+    location: Option<String>,
+    /// An http, https or mailto link
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
+    /// Show the time as free rather than busy
+    #[arg(long)]
+    free: bool,
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct EventEditArgs {
     #[arg(long)]
     event_id: EventId,
@@ -289,6 +302,33 @@ struct EventEditArgs {
     all_day_start: Option<NaiveDate>,
     #[arg(long, conflicts_with_all = ["start", "end", "timezone"])]
     all_day_end: Option<NaiveDate>,
+    /// Move the event to another live calendar
+    #[arg(long, value_name = "CALENDAR_ID")]
+    calendar: Option<CalendarId>,
+    /// Replace the description; newlines are kept
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_description")]
+    description: Option<String>,
+    /// Remove the description
+    #[arg(long)]
+    clear_description: bool,
+    /// Replace the location
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_location")]
+    location: Option<String>,
+    /// Remove the location
+    #[arg(long)]
+    clear_location: bool,
+    /// Replace the link; http, https or mailto
+    #[arg(long, value_name = "URL", conflicts_with = "clear_url")]
+    url: Option<String>,
+    /// Remove the link
+    #[arg(long)]
+    clear_url: bool,
+    /// Show the time as busy
+    #[arg(long, conflicts_with = "free")]
+    busy: bool,
+    /// Show the time as free
+    #[arg(long)]
+    free: bool,
 }
 
 #[derive(Debug, Args)]
@@ -525,6 +565,17 @@ fn event_edit(args: &EventEditArgs) -> Result<EventEdit, AppError> {
     let edit = EventEdit {
         title: args.title.clone(),
         time,
+        calendar_id: args.calendar,
+        description: text_change(args.description.as_ref(), args.clear_description),
+        location: text_change(args.location.as_ref(), args.clear_location),
+        url: text_change(args.url.as_ref(), args.clear_url),
+        busy: if args.busy {
+            Some(true)
+        } else if args.free {
+            Some(false)
+        } else {
+            None
+        },
     };
     if edit.is_empty() {
         return Err(AppError::InvalidInput(
@@ -532,6 +583,15 @@ fn event_edit(args: &EventEditArgs) -> Result<EventEdit, AppError> {
         ));
     }
     Ok(edit)
+}
+
+/// Turn a set flag and its clear flag into one edit intention.
+fn text_change(value: Option<&String>, clear: bool) -> Change<String> {
+    match (value, clear) {
+        (Some(value), _) => Change::Set(value.clone()),
+        (None, true) => Change::Clear,
+        (None, false) => Change::Keep,
+    }
 }
 
 fn application_error(error: ApplicationError<StorageError>) -> AppError {
@@ -688,7 +748,13 @@ fn run_event_command(
             required(args.calendar, no_input, "calendar", "Calendar ID")?,
             required(args.title.clone(), no_input, "title", "Event title")?,
             event_time(args, no_input)?,
-            event_recurrence(args)?,
+            EventDetails {
+                description: args.description.clone(),
+                location: args.location.clone(),
+                url: args.url.clone(),
+                busy: !args.free,
+                recurrence: event_recurrence(args)?,
+            },
         ))
     } else {
         None
@@ -715,9 +781,9 @@ fn run_event_command(
     };
     match &args.command {
         EventCommand::Create(_) => {
-            let (calendar_id, title, time, recurrence) = create_input.expect("create input exists");
+            let (calendar_id, title, time, details) = create_input.expect("create input exists");
             let event = app()?
-                .create_repeating_event(calendar_id, title, time, recurrence)
+                .create_detailed_event(calendar_id, title, time, details)
                 .map_err(application_error)?;
             print_projection(json, "event.create", EventProjection::from(event))
         }

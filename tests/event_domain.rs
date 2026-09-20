@@ -453,3 +453,154 @@ fn a_repeating_event_is_created_with_its_rule_and_an_unusable_rule_is_refused() 
         .unwrap();
     assert_eq!(plain.metadata.recurrence_rule, None);
 }
+
+#[test]
+fn event_text_fields_are_bounded_and_refuse_stray_control_characters() {
+    use mg_calr::domain::{
+        MAX_DESCRIPTION_CHARS, MAX_LOCATION_CHARS, MAX_URL_CHARS, validate_description,
+        validate_location, validate_url,
+    };
+
+    // a description is multi-line, so newlines and tabs are the only controls it keeps
+    assert_eq!(
+        validate_description("Two\nlines\tapart".to_owned()).unwrap(),
+        "Two\nlines\tapart"
+    );
+    assert!(matches!(
+        validate_description("bell\u{7}".to_owned()),
+        Err(DomainError::ControlCharacter { .. })
+    ));
+    assert!(matches!(
+        validate_description("   ".to_owned()),
+        Err(DomainError::EmptyField { .. })
+    ));
+    assert!(matches!(
+        validate_description("x".repeat(MAX_DESCRIPTION_CHARS + 1)),
+        Err(DomainError::TooLong {
+            max: MAX_DESCRIPTION_CHARS,
+            ..
+        })
+    ));
+
+    // a location is one line
+    assert_eq!(validate_location("Room 4".to_owned()).unwrap(), "Room 4");
+    assert!(matches!(
+        validate_location("Room\n4".to_owned()),
+        Err(DomainError::ControlCharacter { .. })
+    ));
+    assert!(matches!(
+        validate_location("x".repeat(MAX_LOCATION_CHARS + 1)),
+        Err(DomainError::TooLong {
+            max: MAX_LOCATION_CHARS,
+            ..
+        })
+    ));
+
+    // a link is one a desktop can open, and nothing else
+    for url in [
+        "https://example.test/a",
+        "http://example.test",
+        "mailto:someone@example.test",
+        "HTTPS://EXAMPLE.TEST",
+    ] {
+        assert_eq!(validate_url(url.to_owned()).unwrap(), url);
+    }
+    for url in [
+        "ftp://example.test",
+        "javascript:alert(1)",
+        "https://",
+        "https://example.test/a b",
+        "",
+    ] {
+        assert!(
+            matches!(validate_url(url.to_owned()), Err(DomainError::InvalidUrl)),
+            "{url} should be refused"
+        );
+    }
+    assert!(matches!(
+        validate_url(format!("https://{}", "x".repeat(MAX_URL_CHARS))),
+        Err(DomainError::TooLong { .. })
+    ));
+}
+
+#[test]
+fn an_edit_keeps_sets_and_clears_each_field_and_rechecks_the_repeat_rule() {
+    use mg_calr::application::{Change, EventEdit};
+
+    let (_directory, store) = scratch();
+    let app = EventUseCases::new(store.clone());
+    let calendar = app.create_calendar("Work").unwrap();
+    let time = EventTime::timed(
+        instant("2026-09-07T07:00:00-07:00"),
+        instant("2026-09-07T07:30:00-07:00"),
+        "America/Los_Angeles",
+    )
+    .unwrap();
+    let event = app
+        .create_detailed_event(
+            calendar.id,
+            "Standup",
+            time.clone(),
+            mg_calr::application::EventDetails {
+                description: Some("First line\nsecond line".to_owned()),
+                location: Some("Room 4".to_owned()),
+                url: Some("https://example.test/standup".to_owned()),
+                busy: true,
+                recurrence: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(event.metadata.location.as_deref(), Some("Room 4"));
+
+    // an untouched field stays as it was; only what the edit names changes
+    let edited = store
+        .edit_event(
+            event.id,
+            event.version,
+            &EventEdit {
+                location: Change::Set("Room 9".to_owned()),
+                busy: Some(false),
+                ..EventEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(edited.metadata.location.as_deref(), Some("Room 9"));
+    assert_eq!(
+        edited.metadata.description.as_deref(),
+        Some("First line\nsecond line")
+    );
+    assert!(!edited.metadata.busy);
+    assert_eq!(edited.title, "Standup");
+
+    // clearing is its own intention, distinct from leaving a field alone
+    let cleared = store
+        .edit_event(
+            event.id,
+            edited.version,
+            &EventEdit {
+                url: Change::Clear,
+                ..EventEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(cleared.metadata.url, None);
+    assert_eq!(cleared.metadata.location.as_deref(), Some("Room 9"));
+
+    // an invalid value is refused and the stored event is untouched
+    assert!(matches!(
+        store.edit_event(
+            event.id,
+            cleared.version,
+            &EventEdit {
+                url: Change::Set("ftp://example.test".to_owned()),
+                ..EventEdit::default()
+            },
+        ),
+        Err(mg_calr::storage::StorageError::InvalidEdit { .. })
+    ));
+    assert_eq!(
+        store.find_event(event.id).unwrap().unwrap().version,
+        cleared.version,
+        "a refused edit does not spend the version"
+    );
+}

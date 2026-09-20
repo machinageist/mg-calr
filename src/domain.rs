@@ -62,6 +62,10 @@ pub enum DomainError {
     UnrepresentableOccurrence { timezone: String },
     #[error("'{value}' is not a repeat frequency; use daily, weekly, or monthly")]
     UnknownFrequency { value: String },
+    #[error("{field} must be at most {max} characters")]
+    TooLong { field: &'static str, max: usize },
+    #[error("event URL must start with http://, https://, or mailto: and contain no whitespace")]
+    InvalidUrl,
 }
 
 macro_rules! domain_id {
@@ -679,6 +683,83 @@ impl Event {
             version,
         })
     }
+}
+
+/// Longest event description a person can store, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 10_000;
+/// Longest event location, in characters.
+pub const MAX_LOCATION_CHARS: usize = 500;
+/// Longest event URL, in characters.
+pub const MAX_URL_CHARS: usize = 2048;
+const URL_SCHEMES: [&str; 3] = ["http://", "https://", "mailto:"];
+
+/// Validate a multi-line event description: newlines and tabs are the only
+/// control characters it may hold.
+///
+/// # Errors
+/// Rejects an empty description, one over [`MAX_DESCRIPTION_CHARS`], and any
+/// other control character.
+pub fn validate_description(value: String) -> Result<String, DomainError> {
+    const FIELD: &str = "event description";
+    if value.trim().is_empty() {
+        return Err(DomainError::EmptyField { field: FIELD });
+    }
+    if value.chars().count() > MAX_DESCRIPTION_CHARS {
+        return Err(DomainError::TooLong {
+            field: FIELD,
+            max: MAX_DESCRIPTION_CHARS,
+        });
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && character != '\n' && character != '\t')
+    {
+        return Err(DomainError::ControlCharacter { field: FIELD });
+    }
+    Ok(value)
+}
+
+/// Validate a single-line event location.
+///
+/// # Errors
+/// Rejects an empty location, one over [`MAX_LOCATION_CHARS`], and any control
+/// character.
+pub fn validate_location(value: String) -> Result<String, DomainError> {
+    let value = validate_text("event location", value)?;
+    if value.chars().count() > MAX_LOCATION_CHARS {
+        return Err(DomainError::TooLong {
+            field: "event location",
+            max: MAX_LOCATION_CHARS,
+        });
+    }
+    Ok(value)
+}
+
+/// Validate an event link: http, https, or mailto only, so a card can open it
+/// without handing an arbitrary scheme to the desktop.
+///
+/// # Errors
+/// Rejects an unsupported scheme, a bare scheme, whitespace or control
+/// characters, and a URL over [`MAX_URL_CHARS`].
+pub fn validate_url(value: String) -> Result<String, DomainError> {
+    if value.chars().count() > MAX_URL_CHARS {
+        return Err(DomainError::TooLong {
+            field: "event URL",
+            max: MAX_URL_CHARS,
+        });
+    }
+    let lowered = value.to_ascii_lowercase();
+    let scheme_ok = URL_SCHEMES
+        .iter()
+        .any(|scheme| lowered.starts_with(scheme) && lowered.len() > scheme.len());
+    if !scheme_ok
+        || value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(DomainError::InvalidUrl);
+    }
+    Ok(value)
 }
 
 fn validate_text(field: &'static str, value: String) -> Result<String, DomainError> {

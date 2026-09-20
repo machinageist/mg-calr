@@ -237,7 +237,7 @@ fn an_edit_needs_the_version_the_writer_saw() {
 
     let edit = EventEdit {
         title: Some("Daily standup".to_owned()),
-        time: None,
+        ..EventEdit::default()
     };
     let edited = store.edit_event(event.id, event.version, &edit).unwrap();
     assert_eq!(edited.title, "Daily standup");
@@ -258,4 +258,58 @@ fn an_edit_needs_the_version_the_writer_saw() {
     ));
     let restored = store.restore_event(event.id, cancelled.version).unwrap();
     assert!(restored.version > cancelled.version);
+}
+
+#[test]
+fn moving_an_event_keeps_its_identity_and_refuses_a_calendar_that_is_not_live() {
+    use mg_calr::domain::Calendar;
+
+    let (_directory, store) = scratch();
+    let from = Calendar::new("Personal").unwrap();
+    let to = Calendar::new("Work").unwrap();
+    store.save_calendar(&from).unwrap();
+    store.save_calendar(&to).unwrap();
+    let event = Event::new(
+        from.id,
+        "Moves house",
+        EventTime::all_day(
+            NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    store.save_event(&event).unwrap();
+
+    let moved = store
+        .edit_event(
+            event.id,
+            event.version,
+            &EventEdit {
+                calendar_id: Some(to.id),
+                ..EventEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(moved.id, event.id, "the event keeps its identity");
+    assert_eq!(moved.calendar_id, to.id);
+    assert_eq!(moved.version, event.version + 1);
+
+    // a calendar that does not exist is not somewhere an event can be moved to
+    assert!(matches!(
+        store.edit_event(
+            event.id,
+            moved.version,
+            &EventEdit {
+                calendar_id: Some(CalendarId::new()),
+                ..EventEdit::default()
+            },
+        ),
+        Err(StorageError::CalendarNotLive { .. })
+    ));
+    assert_eq!(
+        store.find_event(event.id).unwrap().unwrap().calendar_id,
+        to.id,
+        "the refused move left the event where it was"
+    );
 }

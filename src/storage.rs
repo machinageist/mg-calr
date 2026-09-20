@@ -188,6 +188,8 @@ pub enum StorageError {
     TagAlreadyExists { normalized_name: String },
     #[error("tag {tag_id} does not exist")]
     TagNotFound { tag_id: TagId },
+    #[error("invalid event edit: {reason}")]
+    InvalidEdit { reason: String },
     #[error("invalid import payload: {reason}")]
     ImportInvalid { reason: String },
     #[error("import conflicts with existing {kind} {id}")]
@@ -598,36 +600,19 @@ impl Store {
     }
 
     /// Edit title and/or temporal columns atomically with an optimistic version check.
+    /// Apply an edit atomically: the event is read under the write lock, its version
+    /// checked, the edit applied to the stored state and revalidated, then every
+    /// editable column written in one statement.
+    ///
+    /// Editing from stored state rather than from the caller's fields is what lets a
+    /// card send only what changed: a repeat rule is re-checked against the resulting
+    /// time, so moving an event cannot leave a rule that no longer fits it.
     pub fn edit_event(
         &self,
         event_id: EventId,
         expected_version: i64,
         edit: &EventEdit,
     ) -> Result<Event, StorageError> {
-        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &edit.time {
-            Some(EventTime::Timed {
-                start,
-                end,
-                timezone,
-            }) => (
-                Some(timezone.clone()),
-                Some(stamp(start.with_timezone(&Utc))),
-                Some(stamp(end.with_timezone(&Utc))),
-                None,
-                None,
-            ),
-            Some(EventTime::AllDay {
-                start,
-                end_exclusive,
-            }) => (
-                None,
-                None,
-                None,
-                Some(start.to_string()),
-                Some(end_exclusive.to_string()),
-            ),
-            None => (None, None, None, None, None),
-        };
         let mut connection = self.conn()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -653,26 +638,53 @@ impl Store {
                 actual_version,
             });
         }
+
+        let stored = read_one_event(&transaction, event_id)?;
+        let next = edit
+            .apply_to(&stored)
+            .map_err(|error| StorageError::InvalidEdit {
+                reason: error.to_string(),
+            })?;
+        // moving an event is only allowed onto a calendar that is still live
+        if next.calendar_id != stored.calendar_id {
+            let live: Option<bool> = transaction
+                .query_row(
+                    "SELECT deleted_at IS NULL FROM calendars WHERE id = ?1",
+                    params![next.calendar_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StorageError::Query)?;
+            if live != Some(true) {
+                return Err(StorageError::CalendarNotLive {
+                    calendar_id: next.calendar_id,
+                });
+            }
+        }
+
+        let (timezone, starts_at, ends_at, all_day_start, all_day_end) = time_columns(&next.time);
         transaction
             .execute(
-                "UPDATE events SET title = COALESCE(?3, title), \
-                 timezone = CASE WHEN ?4 THEN ?5 ELSE timezone END, \
-                 starts_at = CASE WHEN ?4 THEN ?6 ELSE starts_at END, \
-                 ends_at = CASE WHEN ?4 THEN ?7 ELSE ends_at END, \
-                 all_day_start = CASE WHEN ?4 THEN ?8 ELSE all_day_start END, \
-                 all_day_end = CASE WHEN ?4 THEN ?9 ELSE all_day_end END, \
-                 version = version + 1, updated_at = ?10 \
+                "UPDATE events SET calendar_id = ?3, title = ?4, description = ?5, location = ?6, \
+                 url = ?7, busy = ?8, timezone = ?9, starts_at = ?10, ends_at = ?11, \
+                 all_day_start = ?12, all_day_end = ?13, recurrence_rule = ?14, \
+                 version = version + 1, updated_at = ?15 \
                  WHERE id = ?1 AND deleted_at IS NULL AND version = ?2",
                 params![
                     event_id.to_string(),
                     expected_version,
-                    edit.title,
-                    edit.time.is_some(),
+                    next.calendar_id.to_string(),
+                    next.title,
+                    next.metadata.description,
+                    next.metadata.location,
+                    next.metadata.url,
+                    next.metadata.busy,
                     timezone,
                     starts_at,
                     ends_at,
                     all_day_start,
                     all_day_end,
+                    recurrence_text(next.metadata.recurrence_rule.as_ref())?,
                     stamp(Utc::now()),
                 ],
             )
@@ -1345,11 +1357,19 @@ fn recurrence_from_text(text: Option<String>) -> Result<Option<EventRecurrence>,
 }
 
 // Write one complete event row inside an open transaction
-fn insert_event_row(
-    transaction: &rusqlite::Transaction<'_>,
-    event: &Event,
-) -> Result<(), StorageError> {
-    let (timezone, starts_at, ends_at, all_day_start, all_day_end) = match &event.time {
+/// The five nullable columns one temporal form occupies: timezone, start, end,
+/// all-day start, all-day end. A row is wholly timed or wholly all-day.
+type TimeColumns = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+// One temporal form, written the same way wherever it is written
+fn time_columns(time: &EventTime) -> TimeColumns {
+    match time {
         EventTime::Timed {
             start,
             end,
@@ -1371,7 +1391,14 @@ fn insert_event_row(
             Some(start.to_string()),
             Some(end_exclusive.to_string()),
         ),
-    };
+    }
+}
+
+fn insert_event_row(
+    transaction: &rusqlite::Transaction<'_>,
+    event: &Event,
+) -> Result<(), StorageError> {
+    let (timezone, starts_at, ends_at, all_day_start, all_day_end) = time_columns(&event.time);
     let extension_properties = serde_json::json!({
         "categories": event.metadata.categories,
         "alarms": event.metadata.alarms,
@@ -1764,7 +1791,7 @@ mod tests {
                 1,
                 &EventEdit {
                     title: Some("Renamed".to_owned()),
-                    time: None,
+                    ..EventEdit::default()
                 },
             )
             .unwrap();
@@ -1777,7 +1804,6 @@ mod tests {
                 event.id,
                 2,
                 &EventEdit {
-                    title: None,
                     time: Some(
                         EventTime::all_day(
                             "2026-08-24".parse().unwrap(),
@@ -1785,6 +1811,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
+                    ..EventEdit::default()
                 },
             )
             .unwrap();
@@ -1799,7 +1826,7 @@ mod tests {
                     2,
                     &EventEdit {
                         title: Some("Stale".to_owned()),
-                        time: None
+                        ..EventEdit::default()
                     }
                 )
                 .unwrap_err(),
